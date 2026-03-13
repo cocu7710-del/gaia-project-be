@@ -1,0 +1,12 @@
+package com.gaiaproject.dto.request;
+
+import java.util.UUID;
+
+public record UpgradeBuildingRequest(
+        UUID playerId,
+        int hexQ,
+        int hexR,
+        String targetBuildingType,  // "TRADING_STATION", "RESEARCH_LAB", "PLANETARY_INSTITUTE", "ACADEMY"
+        String techTileCode,        // (선택) 교역소/아카데미 건설 시 획득할 기술 타일 코드
+        String techTrackCode        // (선택) COMMON 타일일 때 플레이어가 선택한 트랙
+) {}

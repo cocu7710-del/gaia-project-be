@@ -1,0 +1,1 @@
+ALTER TABLE game_player_state ADD COLUMN gaia_power INTEGER NOT NULL DEFAULT 0;
