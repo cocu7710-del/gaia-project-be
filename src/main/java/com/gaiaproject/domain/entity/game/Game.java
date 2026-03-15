@@ -205,6 +205,12 @@ public class Game {
         return setupMineIndex != null && setupMineOrder != null;
     }
 
+    /** 게임 페이즈 설정 */
+    public void setGamePhase(String phase) {
+        this.gamePhase = phase;
+        this.updatedAt = LocalDateTime.now();
+    }
+
     /** 부스터 선택 단계인지 확인 */
     public boolean isInBoosterSelectionPhase() {
         return "BOOSTER_SELECTION".equals(gamePhase);

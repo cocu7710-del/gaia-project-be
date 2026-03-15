@@ -7,5 +7,6 @@ public record FleetShipActionRequest(
         String actionCode,
         Integer hexQ,       // 광산 배치 / 건물 업그레이드 좌표 (nullable)
         Integer hexR,
-        String trackCode    // 기술 트랙 전진 (nullable)
+        String trackCode,   // 기술 타일 코드 또는 트랙 코드 (nullable)
+        String techTrackCode // REBELLION_TECH: 타일 획득 시 전진할 트랙 코드 (nullable)
 ) {}

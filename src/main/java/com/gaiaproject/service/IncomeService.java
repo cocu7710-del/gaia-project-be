@@ -266,6 +266,12 @@ public class IncomeService {
         );
 
         player.applyIncome(buildingIncome);
+
+        // 하이브 PI 수입: 1 QIC
+        if (player.getFactionType() == FactionType.IVITS && player.getStockPlanetaryInstitute() == 0) {
+            player.addQic(1);
+            log.debug("[IVITS PI] QIC +1 수입 적용");
+        }
         log.debug("건물 수입 적용: 광산 {}개, 교역소 {}개, 연구소 {}개, 행성수도 {}개, 학원 {}개 -> {}",
                 8 - player.getStockMine(),
                 4 - player.getStockTradingStation(),

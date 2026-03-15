@@ -9,12 +9,10 @@ import com.gaiaproject.repository.game.GameActionRepository;
 import com.gaiaproject.repository.game.GamePlayerPassRepository;
 import com.gaiaproject.repository.game.GameRepository;
 import com.gaiaproject.repository.game.GameSeatRepository;
-import jakarta.transaction.Transactional;
+import org.springframework.transaction.annotation.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.List;
 import java.util.UUID;
@@ -71,30 +69,12 @@ public class ActionService {
             if (roundEnded) {
                 // 라운드 종료 처리
                 endRoundAndStartNext(game);
-                final int nextRound = game.getCurrentRound();
-                if (TransactionSynchronizationManager.isSynchronizationActive()) {
-                    TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                        @Override public void afterCommit() {
-                            webSocketService.broadcastRoundStarted(gameId, nextRound);
-                        }
-                    });
-                } else {
-                    webSocketService.broadcastRoundStarted(gameId, nextRound);
-                }
+                webSocketService.broadcastRoundStarted(gameId, game.getCurrentRound());
             } else {
                 // 턴 넘김
                 game.nextTurn(nextSeatNo);
                 gameRepository.save(game);
-                final int finalNextSeatNo = nextSeatNo;
-                if (TransactionSynchronizationManager.isSynchronizationActive()) {
-                    TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                        @Override public void afterCommit() {
-                            webSocketService.broadcastTurnChanged(gameId, finalNextSeatNo);
-                        }
-                    });
-                } else {
-                    webSocketService.broadcastTurnChanged(gameId, finalNextSeatNo);
-                }
+                webSocketService.broadcastTurnChanged(gameId, nextSeatNo);
             }
 
             return ConfirmActionResponse.success(gameId, action.getId(), nextSeatNo, roundEnded);
@@ -132,29 +112,11 @@ public class ActionService {
 
         if (roundEnded) {
             endRoundAndStartNext(game);
-            final int nextRound = game.getCurrentRound();
-            if (TransactionSynchronizationManager.isSynchronizationActive()) {
-                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                    @Override public void afterCommit() {
-                        webSocketService.broadcastRoundStarted(game.getId(), nextRound);
-                    }
-                });
-            } else {
-                webSocketService.broadcastRoundStarted(game.getId(), nextRound);
-            }
+            webSocketService.broadcastRoundStarted(game.getId(), game.getCurrentRound());
         } else {
             game.nextTurn(nextSeatNo);
             gameRepository.save(game);
-            final int finalNextSeatNo = nextSeatNo;
-            if (TransactionSynchronizationManager.isSynchronizationActive()) {
-                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                    @Override public void afterCommit() {
-                        webSocketService.broadcastTurnChanged(game.getId(), finalNextSeatNo);
-                    }
-                });
-            } else {
-                webSocketService.broadcastTurnChanged(game.getId(), finalNextSeatNo);
-            }
+            webSocketService.broadcastTurnChanged(game.getId(), nextSeatNo);
         }
     }
 

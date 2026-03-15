@@ -7,7 +7,10 @@ import com.gaiaproject.dto.ResourcesVo;
 import com.gaiaproject.dto.response.FederationTilesResponse;
 import com.gaiaproject.dto.response.FederationTilesResponse.ArtifactInfo;
 import com.gaiaproject.dto.response.FederationTilesResponse.FederationTileInfo;
+import com.gaiaproject.dto.request.FormFederationRequest;
+import com.gaiaproject.dto.response.FormFederationResponse;
 import com.gaiaproject.repository.artifact.GameArtifactOfferRepository;
+import com.gaiaproject.service.FederationFormService;
 import com.gaiaproject.service.FederationTileService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -26,6 +29,7 @@ import java.util.UUID;
 public class FederationController {
 
     private final FederationTileService federationTileService;
+    private final FederationFormService federationFormService;
     private final GameArtifactOfferRepository artifactOfferRepository;
 
     @Operation(summary = "연방 타일 목록 조회")
@@ -90,5 +94,38 @@ public class FederationController {
         }
 
         return sb.toString().trim();
+    }
+
+    @Operation(summary = "연방 건물 선택 검증 (토큰 배치 전)")
+    @PostMapping("/validate-buildings")
+    public ResponseEntity<?> validateBuildings(
+            @PathVariable UUID roomId,
+            @RequestBody FormFederationRequest request) {
+        var result = federationFormService.validateBuildingSelection(roomId, request);
+        return ResponseEntity.ok(result);
+    }
+
+    @Operation(summary = "연방 배치 조건 체크 (타일 선택 전)")
+    @PostMapping("/validate")
+    public ResponseEntity<FormFederationResponse> validateFederation(
+            @PathVariable UUID roomId,
+            @RequestBody FormFederationRequest request) {
+        FormFederationResponse response = federationFormService.validateFederation(roomId, request);
+        return ResponseEntity.ok(response);
+    }
+
+    @Operation(summary = "연방 형성 (타일 선택 후 확정)")
+    @PostMapping("/form")
+    public ResponseEntity<FormFederationResponse> formFederation(
+            @PathVariable UUID roomId,
+            @RequestBody FormFederationRequest request) {
+        FormFederationResponse response = federationFormService.formFederation(roomId, request);
+        return ResponseEntity.ok(response);
+    }
+
+    @Operation(summary = "게임의 연방 그룹 목록 조회")
+    @GetMapping("/groups")
+    public ResponseEntity<List<FederationFormService.FederationGroupInfo>> getFederationGroups(@PathVariable UUID roomId) {
+        return ResponseEntity.ok(federationFormService.getFederationGroups(roomId));
     }
 }

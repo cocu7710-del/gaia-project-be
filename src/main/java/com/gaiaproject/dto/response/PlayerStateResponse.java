@@ -40,6 +40,12 @@ public record PlayerStateResponse(
         Integer techEconomy,
         Integer techScience,
 
+        // 가이아 파워
+        Integer gaiaPower,
+
+        // 타클론 전용: 브레인스톤 위치 (1, 2, 3 = 파워볼, null = 없음)
+        Integer brainstoneBowl,
+
         // 부스터 액션 사용 여부
         Boolean boosterActionUsed,
 

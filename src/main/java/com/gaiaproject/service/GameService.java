@@ -29,7 +29,7 @@ import com.gaiaproject.repository.player.GamePlayerStateRepository;
 import com.gaiaproject.repository.player.PlayerRepository;
 import com.gaiaproject.repository.rounds.GameFinalScoringRepository;
 import com.gaiaproject.repository.rounds.GameRoundScoringRepository;
-import jakarta.transaction.Transactional;
+import org.springframework.transaction.annotation.Transactional;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -703,6 +703,8 @@ public class GameService {
                         p.getTechGaia(),
                         p.getTechEconomy(),
                         p.getTechScience(),
+                        p.getGaiaPower(),
+                        p.getBrainstoneBowl(),
                         p.isBoosterActionUsed(),
                         p.isFactionAbilityUsed(),
                         p.getBaltaksConvertedGaiaformers(),

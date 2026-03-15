@@ -72,6 +72,36 @@ public class FreeConvertService {
                     ps.addQic(1);
                     log.info("[FREE] 파워4→QIC: player={}", playerId);
                 }
+                case "KNOWLEDGE_TO_CREDIT" -> {
+                    ps.spendKnowledge(1);
+                    ps.addCredit(1);
+                    log.info("[FREE] 지식1→크레딧: player={}", playerId);
+                }
+                case "QIC_TO_ORE" -> {
+                    ps.spendQic(1);
+                    ps.addOre(1);
+                    log.info("[FREE] QIC1→광석: player={}", playerId);
+                }
+                case "BAL_TAKS_CONVERT_GAIAFORMER" -> {
+                    if (ps.getStockGaiaformer() <= 0) throw new IllegalStateException("가이아포머 재고 없음");
+                    ps.convertGaiaformerToQic();
+                    log.info("[FREE] 발타크 포머→QIC: player={}", playerId);
+                }
+                case "HADSCH_HALLAS_3C_ORE" -> {
+                    ps.spendCredit(3);
+                    ps.addOre(1);
+                    log.info("[FREE] 하쉬할라 3c→광석: player={}", playerId);
+                }
+                case "HADSCH_HALLAS_4C_KNOWLEDGE" -> {
+                    ps.spendCredit(4);
+                    ps.addKnowledge(1);
+                    log.info("[FREE] 하쉬할라 4c→지식: player={}", playerId);
+                }
+                case "HADSCH_HALLAS_4C_QIC" -> {
+                    ps.spendCredit(4);
+                    ps.addQic(1);
+                    log.info("[FREE] 하쉬할라 4c→QIC: player={}", playerId);
+                }
                 default -> { return FreeConvertResponse.fail("알 수 없는 변환 코드: " + convertCode); }
             }
         } catch (IllegalStateException e) {

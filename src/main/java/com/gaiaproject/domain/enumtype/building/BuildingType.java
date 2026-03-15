@@ -12,7 +12,8 @@ public enum BuildingType {
     RESEARCH_LAB("연구소", 3),
     PLANETARY_INSTITUTE("행성 의회", 4),
     ACADEMY("아카데미", 5),
-    GAIAFORMER("가이아포머", 6);
+    GAIAFORMER("가이아포머", 6),
+    SPACE_STATION("우주정거장", 1);
 
     private final String displayName;
     private final int powerValue;  // 연방 형성 시 파워 값

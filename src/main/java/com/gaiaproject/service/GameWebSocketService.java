@@ -5,12 +5,15 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.UUID;
 
 /**
  * WebSocket 브로드캐스트 서비스
  * - 게임 이벤트를 해당 방의 모든 클라이언트에게 전송
+ * - 트랜잭션 내에서 호출 시 커밋 후 전송 (클라이언트가 최신 데이터를 조회할 수 있도록)
  */
 @Slf4j
 @Service
@@ -21,9 +24,23 @@ public class GameWebSocketService {
 
     /**
      * 특정 방의 모든 클라이언트에게 이벤트 전송
-     * - 클라이언트는 /topic/room/{roomId} 를 구독해야 함
+     * - 트랜잭션 활성 시: 커밋 후 전송
+     * - 트랜잭션 비활성 시: 즉시 전송
      */
     public void broadcast(GameEvent event) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    sendEvent(event);
+                }
+            });
+        } else {
+            sendEvent(event);
+        }
+    }
+
+    private void sendEvent(GameEvent event) {
         String destination = "/topic/room/" + event.roomId();
         log.info("Broadcasting event: {} to {}", event.eventType(), destination);
         messagingTemplate.convertAndSend(destination, event);
@@ -96,15 +113,15 @@ public class GameWebSocketService {
     }
 
     /**
-     * 파워 리치 결정 요청 이벤트
+     * 파워 리치 결정 요청 이벤트 (동시 결정 - 모든 결정자에게 동시 전달)
      */
-    public void broadcastLeechOffered(UUID roomId, String batchKey, String currentLeechId,
-                                       String currentDeciderId, java.util.List<java.util.Map<String, Object>> offers) {
+    public void broadcastLeechOfferedAll(UUID roomId, String batchKey,
+                                          java.util.List<java.util.Map<String, Object>> offers,
+                                          java.util.List<String> deciderIds) {
         broadcast(GameEvent.of(roomId, "LEECH_OFFERED", java.util.Map.of(
                 "batchKey", batchKey,
-                "currentLeechId", currentLeechId,
-                "currentDeciderId", currentDeciderId,
-                "offers", offers
+                "offers", offers,
+                "deciderIds", deciderIds
         )));
     }
 
@@ -122,6 +139,27 @@ public class GameWebSocketService {
             payload.put("nextDeciderId", nextOffer.getReceivePlayerId().toString());
         }
         broadcast(GameEvent.of(roomId, "LEECH_DECIDED", payload));
+    }
+
+    /**
+     * 팅커로이드 PI: 라운드 시작 시 액션 타일 선택 요청
+     */
+    public void broadcastTinkeroidsActionChoice(UUID roomId, UUID tinkeroidsPlayerId, java.util.List<String> availableActions, int currentRound) {
+        broadcast(GameEvent.of(roomId, "TINKEROIDS_ACTION_CHOICE", java.util.Map.of(
+                "tinkeroidsPlayerId", tinkeroidsPlayerId.toString(),
+                "availableActions", availableActions,
+                "currentRound", currentRound
+        )));
+    }
+
+    /**
+     * 아이타 PI: 라운드 종료 시 가이아→기술타일 선택 요청
+     */
+    public void broadcastItarsGaiaChoice(UUID roomId, UUID itarsPlayerId, int availableChoices) {
+        broadcast(GameEvent.of(roomId, "ITARS_GAIA_CHOICE", java.util.Map.of(
+                "itarsPlayerId", itarsPlayerId.toString(),
+                "availableChoices", availableChoices
+        )));
     }
 
     /**

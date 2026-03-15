@@ -8,10 +8,12 @@ import com.gaiaproject.domain.enumtype.action.PowerActionType;
 import com.gaiaproject.dto.request.UsePowerActionRequest;
 import com.gaiaproject.dto.response.ConfirmActionResponse;
 import com.gaiaproject.dto.response.UsePowerActionResponse;
+import com.gaiaproject.domain.entity.game.GameAction;
+import com.gaiaproject.repository.game.GameActionRepository;
 import com.gaiaproject.repository.game.GamePowerActionUsageRepository;
 import com.gaiaproject.repository.game.GameRepository;
 import com.gaiaproject.repository.player.GamePlayerStateRepository;
-import jakarta.transaction.Transactional;
+import org.springframework.transaction.annotation.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -28,6 +30,7 @@ public class PowerActionService {
     private final GameRepository gameRepository;
     private final GamePlayerStateRepository playerStateRepository;
     private final GamePowerActionUsageRepository powerActionUsageRepository;
+    private final GameActionRepository gameActionRepository;
     private final ActionService actionService;
 
     private record PowerActionEffect(int powerCost, int creditsGain, int oreGain, int knowledgeGain, int qicGain, int powerTokenGain) {
@@ -68,14 +71,55 @@ public class PowerActionService {
         log.info("파워 소각: game={}, player={}, bowl2={}, bowl3={}", gameId, playerId, playerState.getPowerBowl2(), playerState.getPowerBowl3());
     }
 
-    /** 이번 라운드 사용된 파워 액션 코드 목록 (enum.name() = FE 코드) */
+    /** 이번 라운드 사용된 파워 액션 + 함대 액션 코드 목록 */
     public List<String> getUsedPowerActionCodes(UUID gameId) {
         Game game = gameRepository.findById(gameId)
                 .orElseThrow(() -> new IllegalArgumentException("게임을 찾을 수 없습니다"));
-        return powerActionUsageRepository.findByGameIdAndRoundNumber(gameId, game.getCurrentRound())
+        int round = game.getCurrentRound() != null ? game.getCurrentRound() : 1;
+
+        // 파워 액션
+        List<String> codes = new java.util.ArrayList<>(
+            powerActionUsageRepository.findByGameIdAndRoundNumber(gameId, round)
                 .stream()
                 .map(usage -> usage.getPowerActionType().name())
+                .toList()
+        );
+
+        // 함대 액션 (GameAction에서 FLEET_SHIP_ACTION 타입의 actionData에서 코드 추출)
+        List<GameAction> fleetActions = gameActionRepository.findByGameIdAndRoundNumber(gameId, round)
+                .stream()
+                .filter(a -> a.getActionType() == ActionType.FLEET_SHIP_ACTION)
                 .toList();
+        for (GameAction fa : fleetActions) {
+            String data = fa.getActionData();
+            if (data != null && data.contains("\"actionCode\":\"")) {
+                // {"actionCode":"REBELLION_TECH",...} 에서 코드 추출
+                int start = data.indexOf("\"actionCode\":\"") + 14;
+                int end = data.indexOf("\"", start);
+                if (end > start) {
+                    String actionCode = data.substring(start, end);
+                    // FE 코드: FLEET_REBELLION_1 형태로 변환
+                    String fleetCode = switch (actionCode) {
+                        case "TF_MARS_VP" -> "FLEET_TF_MARS_1";
+                        case "TF_MARS_GAIAFORM" -> "FLEET_TF_MARS_2";
+                        case "TF_MARS_TERRAFORM" -> "FLEET_TF_MARS_3";
+                        case "ECLIPSE_VP" -> "FLEET_ECLIPSE_1";
+                        case "ECLIPSE_TECH" -> "FLEET_ECLIPSE_2";
+                        case "ECLIPSE_MINE" -> "FLEET_ECLIPSE_3";
+                        case "REBELLION_TECH" -> "FLEET_REBELLION_1";
+                        case "REBELLION_UPGRADE" -> "FLEET_REBELLION_2";
+                        case "REBELLION_CONVERT" -> "FLEET_REBELLION_3";
+                        case "TWILIGHT_FED" -> "FLEET_TWILIGHT_1";
+                        case "TWILIGHT_UPGRADE" -> "FLEET_TWILIGHT_2";
+                        case "TWILIGHT_NAV" -> "FLEET_TWILIGHT_3";
+                        default -> actionCode;
+                    };
+                    codes.add(fleetCode);
+                }
+            }
+        }
+
+        return codes;
     }
 
     public UsePowerActionResponse usePowerAction(UUID gameId, UsePowerActionRequest request) {

@@ -44,4 +44,11 @@ public class GameSectorPlacement {
     public SectorType getSectorType() {
         return SectorType.valueOf(this.sectorId);
     }
+
+    /**
+     * 섹터를 60도 시계방향 회전
+     */
+    public void rotateBy60() {
+        this.rotation = (this.rotation + 60) % 360;
+    }
 }

@@ -21,12 +21,10 @@ import com.gaiaproject.repository.game.GameSeatRepository;
 import com.gaiaproject.repository.map.GameHexRepository;
 import com.gaiaproject.repository.player.GamePlayerRoundBoosterRepository;
 import com.gaiaproject.repository.player.GamePlayerStateRepository;
-import jakarta.transaction.Transactional;
+import org.springframework.transaction.annotation.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.List;
 import java.util.UUID;
@@ -150,30 +148,18 @@ public class PassService {
         if (allPassed) {
             // 라운드 종료
             nextSeatNo = 0;
-            endRoundAndStartNext(game);
-            final int roundAfter = game.getCurrentRound();
-            // 트랜잭션 커밋 후 브로드캐스트 (커밋 전 조회 시 수입 미반영 방지)
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    webSocketService.broadcastPlayerPassed(gameId, playerId, true);
-                    webSocketService.broadcastRoundStarted(gameId, roundAfter);
-                }
-            });
+            boolean itarsWaiting = endRoundAndStartNext(game);
+            webSocketService.broadcastPlayerPassed(gameId, playerId, true);
+            if (!itarsWaiting) {
+                webSocketService.broadcastRoundStarted(gameId, game.getCurrentRound());
+            }
         } else {
             // 다음 턴 계산
             nextSeatNo = calculateNextTurnSeatNo(game);
             game.nextTurn(nextSeatNo);
             gameRepository.save(game);
-            final int nextSeatNoFinal = nextSeatNo;
-            // 트랜잭션 커밋 후 브로드캐스트
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    webSocketService.broadcastPlayerPassed(gameId, playerId, false);
-                    webSocketService.broadcastTurnChanged(gameId, nextSeatNoFinal);
-                }
-            });
+            webSocketService.broadcastPlayerPassed(gameId, playerId, false);
+            webSocketService.broadcastTurnChanged(gameId, nextSeatNo);
         }
 
         return PassRoundResponse.success(gameId, playerId, currentRound, nextSeatNo, allPassed);
@@ -253,22 +239,128 @@ public class PassService {
     }
 
     /**
-     * 라운드 종료 및 다음 라운드 시작
+     * 라운드 종료 및 다음 라운드 시작.
+     * @return true: 아이타 선택 대기 중 (ROUND_STARTED 브로드캐스트 하지 않음)
      */
-    private void endRoundAndStartNext(Game game) {
+    private boolean endRoundAndStartNext(Game game) {
         UUID gameId = game.getId();
         log.info("라운드 {} 종료, 다음 라운드 시작", game.getCurrentRound());
 
-        // 다음 라운드로 이동
+        // 다음 라운드로 이동 (첫 번째 플레이어 = 먼저 패스한 플레이어)
+        int prevRound = game.getCurrentRound();
         game.nextRound();
+
+        // 패스 순서(passedAt)로 첫 번째 플레이어 결정
+        List<GamePlayerPass> passes = passRepository.findByGameIdAndRoundNumber(gameId, prevRound);
+        passes.sort((a, b) -> a.getPassedAt().compareTo(b.getPassedAt()));
+        if (!passes.isEmpty()) {
+            UUID firstPassedPlayerId = passes.get(0).getPlayerId();
+            seatRepository.findByGameIdAndPlayerId(gameId, firstPassedPlayerId)
+                    .ifPresent(seat -> game.nextTurn(seat.getSeatNo()));
+        }
         gameRepository.save(game);
 
         // 1. 수입 배분
         incomeService.applyRoundIncome(game);
 
-        // 2. 가이아 페이즈: TRANSDIM → GAIA 변환 + 가이아 파워 bowl1 복귀 (수입 이후)
-        gaiaformingService.processGaiaPhase(gameId);
+        // 2. TRANSDIM → GAIA 헥스 변환
+        gaiaformingService.processGaiaPlanetConversion(gameId);
 
+        // 3. 팅커로이드 PI 체크: 액션 타일 선택 기회
+        List<GamePlayerState> allPlayers = playerStateRepository.findByGameId(gameId);
+        GamePlayerState tinkeroidsPlayer = allPlayers.stream()
+                .filter(p -> p.getFactionType() == com.gaiaproject.domain.enumtype.player.FactionType.TINKEROIDS
+                        && p.getStockPlanetaryInstitute() == 0)
+                .findFirst().orElse(null);
+
+        if (tinkeroidsPlayer != null) {
+            List<String> available = getTinkeroidsAvailableActions(tinkeroidsPlayer, game.getCurrentRound());
+            if (!available.isEmpty()) {
+                game.setGamePhase("TINKEROIDS_ACTION_PHASE");
+                gameRepository.save(game);
+                webSocketService.broadcastTinkeroidsActionChoice(gameId, tinkeroidsPlayer.getPlayerId(), available, game.getCurrentRound());
+                log.info("팅커로이드 액션 선택 대기: game={}, round={}, available={}", gameId, game.getCurrentRound(), available);
+                return true;
+            }
+        }
+
+        // 4. 아이타 PI 체크: 가이아 4개 이상이면 선택 기회 부여
+        GamePlayerState itarsPlayer = allPlayers.stream()
+                .filter(p -> p.getFactionType() == com.gaiaproject.domain.enumtype.player.FactionType.ITARS
+                        && p.getStockPlanetaryInstitute() == 0
+                        && p.getGaiaPower() >= 4)
+                .findFirst().orElse(null);
+
+        if (itarsPlayer != null) {
+            // 아이타 제외 모든 플레이어 가이아 복귀
+            gaiaformingService.returnGaiaPowerExcept(gameId, itarsPlayer.getPlayerId());
+
+            // 아이타: 4의 배수 유지, 나머지 복귀
+            int keep = (itarsPlayer.getGaiaPower() / 4) * 4;
+            int returnAmt = itarsPlayer.getGaiaPower() - keep;
+            if (returnAmt > 0) {
+                itarsPlayer.removeGaiaPower(returnAmt);
+                itarsPlayer.addPowerToBowl1(returnAmt);
+                playerStateRepository.save(itarsPlayer);
+            }
+
+            game.setGamePhase("ITARS_GAIA_PHASE");
+            gameRepository.save(game);
+
+            webSocketService.broadcastItarsGaiaChoice(gameId, itarsPlayer.getPlayerId(), keep / 4);
+            log.info("아이타 가이아 선택 대기: game={}, player={}, choices={}", gameId, itarsPlayer.getPlayerId(), keep / 4);
+            return true;
+        }
+
+        // 일반: 모든 플레이어 가이아 복귀
+        gaiaformingService.returnAllGaiaPower(gameId);
         log.info("라운드 {} 시작", game.getCurrentRound());
+        return false;
+    }
+
+    /** 팅커로이드 라운드별 선택 가능 액션 */
+    private List<String> getTinkeroidsAvailableActions(GamePlayerState ps, int round) {
+        List<String> pool = round <= 3
+                ? List.of("TINK_TERRAFORM_1", "TINK_POWER_4", "TINK_QIC_1")
+                : List.of("TINK_TERRAFORM_3", "TINK_KNOWLEDGE_3", "TINK_QIC_2");
+        return pool.stream().filter(a -> !ps.isTinkeroidsActionUsed(a)).toList();
+    }
+
+    /**
+     * 팅커로이드 액션 선택 완료 → 아이타 체크 또는 라운드 시작으로 진행
+     */
+    public void continueTinkeroidsToNextPhase(UUID gameId) {
+        Game game = gameRepository.findById(gameId)
+                .orElseThrow(() -> new IllegalArgumentException("게임을 찾을 수 없습니다"));
+
+        List<GamePlayerState> allPlayers = playerStateRepository.findByGameId(gameId);
+
+        // 아이타 PI 체크
+        GamePlayerState itarsPlayer = allPlayers.stream()
+                .filter(p -> p.getFactionType() == com.gaiaproject.domain.enumtype.player.FactionType.ITARS
+                        && p.getStockPlanetaryInstitute() == 0
+                        && p.getGaiaPower() >= 4)
+                .findFirst().orElse(null);
+
+        if (itarsPlayer != null) {
+            gaiaformingService.returnGaiaPowerExcept(gameId, itarsPlayer.getPlayerId());
+            int keep = (itarsPlayer.getGaiaPower() / 4) * 4;
+            int returnAmt = itarsPlayer.getGaiaPower() - keep;
+            if (returnAmt > 0) {
+                itarsPlayer.removeGaiaPower(returnAmt);
+                itarsPlayer.addPowerToBowl1(returnAmt);
+                playerStateRepository.save(itarsPlayer);
+            }
+            game.setGamePhase("ITARS_GAIA_PHASE");
+            gameRepository.save(game);
+            webSocketService.broadcastItarsGaiaChoice(gameId, itarsPlayer.getPlayerId(), keep / 4);
+            return;
+        }
+
+        // 일반 진행
+        gaiaformingService.returnAllGaiaPower(gameId);
+        game.setGamePhase("PLAYING");
+        gameRepository.save(game);
+        webSocketService.broadcastRoundStarted(gameId, game.getCurrentRound());
     }
 }

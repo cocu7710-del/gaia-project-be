@@ -171,6 +171,26 @@ public class GaiaformingService {
         }
 
         // 2. 모든 플레이어 가이아 파워 복귀
+        returnAllGaiaPower(gameId);
+    }
+
+    /** TRANSDIM → GAIA 헥스 변환만 (가이아 파워 복귀 없이) */
+    public void processGaiaPlanetConversion(UUID gameId) {
+        List<GameBuilding> gaiaformers = buildingRepository.findByGameIdAndBuildingType(gameId, BuildingType.GAIAFORMER);
+        for (GameBuilding gf : gaiaformers) {
+            hexRepository.findByGameIdAndHexQAndHexR(gameId, gf.getHexQ(), gf.getHexR())
+                    .ifPresent(hex -> {
+                        if (hex.getPlanetType() == PlanetType.TRANSDIM) {
+                            hex.convertToGaia();
+                            hexRepository.save(hex);
+                            log.info("TRANSDIM → GAIA 변환: game={}, ({},{})", gameId, gf.getHexQ(), gf.getHexR());
+                        }
+                    });
+        }
+    }
+
+    /** 모든 플레이어 가이아 파워 복귀 */
+    public void returnAllGaiaPower(UUID gameId) {
         List<GamePlayerState> players = playerStateRepository.findByGameId(gameId);
         for (GamePlayerState player : players) {
             if (player.getGaiaPower() > 0) {
@@ -178,6 +198,27 @@ public class GaiaformingService {
                 playerStateRepository.save(player);
                 log.info("가이아 파워 복귀: game={}, player={}", gameId, player.getPlayerId());
             }
+        }
+    }
+
+    /** 특정 플레이어 제외 가이아 파워 복귀 */
+    public void returnGaiaPowerExcept(UUID gameId, UUID excludePlayerId) {
+        List<GamePlayerState> players = playerStateRepository.findByGameId(gameId);
+        for (GamePlayerState player : players) {
+            if (player.getGaiaPower() > 0 && !player.getPlayerId().equals(excludePlayerId)) {
+                player.returnGaiaPower();
+                playerStateRepository.save(player);
+            }
+        }
+    }
+
+    /** 특정 플레이어 잔여 가이아 파워 복귀 */
+    public void returnGaiaPowerForPlayer(UUID gameId, UUID playerId) {
+        GamePlayerState ps = playerStateRepository.findByGameIdAndPlayerId(gameId, playerId).orElse(null);
+        if (ps != null && ps.getGaiaPower() > 0) {
+            ps.returnGaiaPower();
+            playerStateRepository.save(ps);
+            log.info("아이타 잔여 가이아 복귀: game={}, player={}", gameId, playerId);
         }
     }
 }

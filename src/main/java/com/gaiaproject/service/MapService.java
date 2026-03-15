@@ -9,6 +9,8 @@ import com.gaiaproject.domain.enumtype.map.MapPosition;
 import com.gaiaproject.domain.enumtype.map.SectorType;
 import com.gaiaproject.domain.enumtype.map.SingleHexTileType;
 import com.gaiaproject.domain.enumtype.player.PlanetType;
+import com.gaiaproject.domain.entity.game.GameSeat;
+import com.gaiaproject.repository.game.GameSeatRepository;
 import com.gaiaproject.repository.map.GameHexRepository;
 import com.gaiaproject.repository.map.GameSectorPlacementRepository;
 import com.gaiaproject.repository.map.GameSingleHexPlacementRepository;
@@ -31,6 +33,8 @@ public class MapService {
     private final GameSectorPlacementRepository sectorPlacementRepository;
     private final GameSingleHexPlacementRepository singleHexPlacementRepository;
     private final GameHexRepository gameHexRepository;
+    private final GameSeatRepository gameSeatRepository;
+    private final com.gaiaproject.repository.game.GameRepository gameRepository;
 
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
@@ -79,6 +83,36 @@ public class MapService {
 
         // 4. 모든 헥스를 글로벌 좌표로 변환하여 저장
         generateGlobalHexes(gameId);
+    }
+
+    /**
+     * 섹터 60도 회전 (캐릭터 선택 전에만 가능)
+     */
+    public void rotateSector(UUID gameId, int positionNo) {
+        // 1. 게임 시작 여부 확인 - gamePhase가 설정되면 회전 불가
+        var game = gameRepository.findById(gameId)
+                .orElseThrow(() -> new IllegalArgumentException("게임을 찾을 수 없습니다"));
+        if (game.getGamePhase() != null) {
+            throw new IllegalStateException("게임 시작 후에는 섹터를 회전할 수 없습니다.");
+        }
+
+        // 2. 섹터 배치 조회
+        GameSectorPlacement placement = sectorPlacementRepository.findByGameIdAndPositionNo(gameId, positionNo)
+                .orElseThrow(() -> new IllegalArgumentException("섹터를 찾을 수 없습니다: positionNo=" + positionNo));
+
+        // 3. 회전 적용
+        placement.rotateBy60();
+        sectorPlacementRepository.save(placement);
+
+        // 4. 기존 헥스 삭제 후 재생성
+        gameHexRepository.deleteByGameIdAndPositionNo(gameId, positionNo);
+
+        MapPosition mapPos = positionNo <= 10
+                ? MapPosition.getSectorPosition(positionNo)
+                : MapPosition.getDeepSectorPosition(positionNo);
+        saveSectorHexes(gameId, placement.getSectorType(), mapPos, placement.getRotation());
+
+        log.info("섹터 회전 완료: gameId={}, positionNo={}, newRotation={}", gameId, positionNo, placement.getRotation());
     }
 
     /**

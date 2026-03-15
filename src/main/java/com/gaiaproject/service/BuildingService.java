@@ -47,6 +47,7 @@ public class BuildingService {
     private final GamePlayerTechTileRepository playerTechTileRepository;
     private final RoundScoringService roundScoringService;
     private final PowerLeechService powerLeechService;
+    private final FederationFormService federationFormService;
 
     /**
      * 초기 광산 배치 (게임 시작 전)
@@ -213,9 +214,9 @@ public class BuildingService {
             return UpgradeBuildingResponse.fail(gameId, "PLAYING 페이즈가 아닙니다");
         }
 
-        // 건물 조회
+        // 건물 조회 (메인 건물, 란티다 기생 제외)
         GameBuilding building = gameBuildingRepository
-                .findByGameIdAndHexQAndHexR(gameId, request.hexQ(), request.hexR())
+                .findFirstByGameIdAndHexQAndHexRAndIsLantidsMine(gameId, request.hexQ(), request.hexR(), false)
                 .orElse(null);
         if (building == null) return UpgradeBuildingResponse.fail(gameId, "건물을 찾을 수 없습니다");
         if (!building.getPlayerId().equals(request.playerId())) return UpgradeBuildingResponse.fail(gameId, "본인 건물이 아닙니다");
@@ -379,9 +380,9 @@ public class BuildingService {
                 .orElse(null);
         if (hex == null) return PlaceMinePlayResponse.fail(gameId, "유효하지 않은 좌표입니다");
 
-        // 기존 건물 확인 (GAIAFORMER는 광산으로 교체 가능)
+        // 기존 건물 확인 (메인 건물 우선, 란티다 기생 제외)
         GameBuilding existingBuilding = gameBuildingRepository
-                .findByGameIdAndHexQAndHexR(gameId, request.hexQ(), request.hexR())
+                .findFirstByGameIdAndHexQAndHexRAndIsLantidsMine(gameId, request.hexQ(), request.hexR(), false)
                 .orElse(null);
 
         boolean isGaiaformerReturn = existingBuilding != null
@@ -406,7 +407,16 @@ public class BuildingService {
 
         if (playerState.getStockMine() <= 0) return PlaceMinePlayResponse.fail(gameId, "광산 재고가 없습니다");
 
-        if (isGaiaformerReturn) {
+        if (isLantidsMine) {
+            // 란티다 기생 광산: 2c + 1o + 항법 QIC (테라포밍 비용 없음)
+            try {
+                playerState.spendCredit(2);
+                playerState.spendOre(1);
+                if (request.qicUsed() > 0) playerState.spendQic(request.qicUsed());
+            } catch (IllegalStateException e) {
+                return PlaceMinePlayResponse.fail(gameId, e.getMessage());
+            }
+        } else if (isGaiaformerReturn) {
             // 가이아포머가 있는 가이아 행성 → 광산 건설: QIC 면제, 포머 반환
             try {
                 playerState.spendCredit(2);
@@ -459,8 +469,8 @@ public class BuildingService {
             log.info("[GLEENS] 가이아 광산 VP +2: player={}", request.playerId());
         }
 
-        // 기오덴 PI: 새 행성 개척 시 +3 지식 (가이아포머 반환 제외)
-        if (!isGaiaformerReturn && !isLantidsMine
+        // 기오덴 PI: 새 행성 개척 시 +3 지식 (란티다 기생 제외, 가이아포머 반환은 포함)
+        if (!isLantidsMine
                 && playerState.getFactionType() == FactionType.GEODENS
                 && hasPlanetaryInstitute(playerState)) {
             playerState.addKnowledge(3);
@@ -506,8 +516,8 @@ public class BuildingService {
             roundScoringService.award(gameId, mineRound, playerState, RoundScoringEvent.NEW_SECTOR_ENTERED, 1);
         }
 
-        // 새로운 행성 종류 개척
-        if (isNewPlanetTypeForPlayer(gameId, request.playerId(), hex.getPlanetType())) {
+        // 새로운 행성 종류 개척 (란티다 기생 제외)
+        if (!isLantidsMine && isNewPlanetTypeForPlayer(gameId, request.playerId(), hex.getPlanetType())) {
             roundScoringService.award(gameId, mineRound, playerState, RoundScoringEvent.NEW_PLANET_TYPE_COLONIZED, 1);
         }
 
@@ -526,6 +536,9 @@ public class BuildingService {
         }
 
         log.info("광산 건설 (PLAYING): game={}, player={}, ({},{})", gameId, request.playerId(), request.hexQ(), request.hexR());
+
+        // 인접 연방에 자동 편입
+        federationFormService.autoJoinFederation(gameId, request.playerId(), request.hexQ(), request.hexR());
 
         // 액션 저장 (턴 진행은 리치 해소 후)
         String actionData = String.format("{\"hexQ\":%d,\"hexR\":%d}", request.hexQ(), request.hexR());
@@ -624,8 +637,8 @@ public class BuildingService {
         List<GameHex> sectorHexes = gameHexRepository.findByGameIdAndSectorId(gameId, sectorId);
         for (GameHex h : sectorHexes) {
             if (gameBuildingRepository.existsByGameIdAndHexQAndHexR(gameId, h.getHexQ(), h.getHexR())) {
-                List<GameBuilding> bs = List.of(gameBuildingRepository.findByGameIdAndHexQAndHexR(gameId, h.getHexQ(), h.getHexR()).orElse(null));
-                if (bs.get(0) != null && bs.get(0).getPlayerId().equals(playerId)) return false;
+                GameBuilding found = gameBuildingRepository.findFirstByGameIdAndHexQAndHexRAndIsLantidsMine(gameId, h.getHexQ(), h.getHexR(), false).orElse(null);
+                if (found != null && found.getPlayerId().equals(playerId)) return false;
             }
         }
         return true;
@@ -658,6 +671,7 @@ public class BuildingService {
         List<GameBuilding> existing = gameBuildingRepository.findByGameIdAndPlayerId(gameId, playerId);
         for (GameBuilding b : existing) {
             if (b.getBuildingType() == BuildingType.GAIAFORMER) continue;
+            if (b.isLantidsMine()) continue; // 란티다 기생은 행성 종류에 포함하지 않음
             GameHex bHex = gameHexRepository.findByGameIdAndHexQAndHexR(gameId, b.getHexQ(), b.getHexR()).orElse(null);
             if (bHex != null && bHex.getPlanetType() == newPlanetType) return false;
         }

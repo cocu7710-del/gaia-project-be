@@ -191,4 +191,24 @@ public class ActionController {
         log.info("종족 능력: roomId={}, playerId={}, ability={}", roomId, request.playerId(), request.abilityCode());
         return ResponseEntity.ok(factionAbilityService.useAbility(roomId, request));
     }
+
+    @Operation(summary = "팅커로이드 라운드 시작 액션 타일 선택")
+    @PostMapping("/tinkeroids-action-choice")
+    public ResponseEntity<FactionAbilityResponse> tinkeroidsActionChoice(
+            @PathVariable UUID roomId,
+            @RequestBody com.gaiaproject.dto.request.TinkeroidsActionChoiceRequest request
+    ) {
+        log.info("팅커로이드 액션 선택: roomId={}, playerId={}, action={}", roomId, request.playerId(), request.actionCode());
+        return ResponseEntity.ok(factionAbilityService.handleTinkeroidsActionChoice(roomId, request));
+    }
+
+    @Operation(summary = "아이타 라운드 종료 가이아→기술타일 선택")
+    @PostMapping("/itars-gaia-choice")
+    public ResponseEntity<FactionAbilityResponse> itarsGaiaChoice(
+            @PathVariable UUID roomId,
+            @RequestBody com.gaiaproject.dto.request.ItarsGaiaChoiceRequest request
+    ) {
+        log.info("아이타 가이아 선택: roomId={}, playerId={}, action={}", roomId, request.playerId(), request.action());
+        return ResponseEntity.ok(factionAbilityService.handleItarsRoundEndChoice(roomId, request));
+    }
 }

@@ -11,7 +11,7 @@ import com.gaiaproject.repository.game.GameRepository;
 import com.gaiaproject.repository.game.GameSeatRepository;
 import com.gaiaproject.repository.leech.GameLeechOfferRepository;
 import com.gaiaproject.repository.player.GamePlayerStateRepository;
-import jakarta.transaction.Transactional;
+import org.springframework.transaction.annotation.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -109,10 +109,19 @@ public class PowerLeechService {
             FactionType faction = resolveFaction(gameId, ps);
             boolean isTaklonsPI = faction == FactionType.TAKLONS && ps.getStockPlanetaryInstitute() == 0;
             boolean canDeclineOne = faction == FactionType.ITARS || isTaklonsPI;
-            int vpCost = Math.max(0, power - 1);
 
-            // 규칙 2-6: VP 부족 시 1파워 무료 자동 수령
-            if (vpCost > 0 && ps.getVictoryPoints() < vpCost) {
+            // 실제 순환 가능한 파워 (bowl1 + bowl2만 순환 가능)
+            int chargeablePower = ps.getPowerBowl1() + ps.getPowerBowl2();
+            int effectivePower = Math.min(power, chargeablePower);
+
+            // 순환 가능한 파워가 0이면 스킵
+            if (effectivePower <= 0) {
+                log.info("[LEECH] 순환 가능 파워 없음 스킵: player={}, bowl1={}, bowl2={}", seat.getPlayerId(), ps.getPowerBowl1(), ps.getPowerBowl2());
+                continue;
+            }
+
+            // 순환 가능한 파워가 1이면 자동 수령 (아이타/타클론PI 제외)
+            if (effectivePower == 1 && !canDeclineOne) {
                 applyPowerToPlayer(ps, 1, 0, isTaklonsPI, null);
                 playerStateRepository.save(ps);
                 saveOffer(gameId, batchKey, triggerPlayerId, seat.getPlayerId(), checkSeatNo,
@@ -120,12 +129,44 @@ public class PowerLeechService {
                         isFirstOffer ? followUpType : null,
                         isFirstOffer ? followUpData : null);
                 isFirstOffer = false;
-                log.info("[LEECH] VP 부족 자동 1파워: player={}, vp={}, needed={}", seat.getPlayerId(), ps.getVictoryPoints(), vpCost);
+                log.info("[LEECH] 순환 1파워 자동 수령: player={}", seat.getPlayerId());
                 continue;
             }
 
-            // 규칙 2-2: 1파워는 특수 종족 제외 자동 수령
-            if (power == 1 && !canDeclineOne) {
+            int vpCost = Math.max(0, effectivePower - 1);
+
+            // VP 부족 시: 현재 VP만큼 까고 (VP+1)파워를 받을지 선택 (effectivePower 기준)
+            if (vpCost > 0 && ps.getVictoryPoints() < vpCost) {
+                int affordableVpCost = Math.min(ps.getVictoryPoints(), effectivePower - 1);
+                int affordablePower = Math.min(affordableVpCost + 1, effectivePower);
+
+                if (affordablePower <= 1 && !canDeclineOne) {
+                    // 0VP = 1파워(무료)만 가능 + 아이타/타클론PI 아닌 경우 → 자동 수령
+                    applyPowerToPlayer(ps, 1, 0, isTaklonsPI, null);
+                    playerStateRepository.save(ps);
+                    saveOffer(gameId, batchKey, triggerPlayerId, seat.getPlayerId(), checkSeatNo,
+                            1, 0, "AUTO_ACCEPTED", seqNo++, false,
+                            isFirstOffer ? followUpType : null,
+                            isFirstOffer ? followUpData : null);
+                    isFirstOffer = false;
+                    log.info("[LEECH] VP 부족 자동 1파워: player={}, vp={}", seat.getPlayerId(), ps.getVictoryPoints());
+                    continue;
+                }
+
+                // 2파워 이상 받을 수 있거나, 아이타/타클론PI → 수동 결정
+                GameLeechOffer offer = saveOffer(gameId, batchKey, triggerPlayerId, seat.getPlayerId(), checkSeatNo,
+                        affordablePower, affordableVpCost, "PENDING", seqNo++, isTaklonsPI,
+                        isFirstOffer ? followUpType : null,
+                        isFirstOffer ? followUpData : null);
+                isFirstOffer = false;
+                pendingOffers.add(offer);
+                log.info("[LEECH] VP 부족 수동 결정: player={}, vp={}, affordablePower={}, affordableVpCost={}",
+                        seat.getPlayerId(), ps.getVictoryPoints(), affordablePower, affordableVpCost);
+                continue;
+            }
+
+            // 규칙 2-2: 1파워(실제 순환 가능 기준)는 특수 종족 제외 자동 수령
+            if (effectivePower == 1 && !canDeclineOne) {
                 applyPowerToPlayer(ps, 1, 0, isTaklonsPI, null);
                 playerStateRepository.save(ps);
                 saveOffer(gameId, batchKey, triggerPlayerId, seat.getPlayerId(), checkSeatNo,
@@ -137,14 +178,14 @@ public class PowerLeechService {
                 continue;
             }
 
-            // 수동 결정 필요
+            // 수동 결정 필요 (effectivePower 기준)
             GameLeechOffer offer = saveOffer(gameId, batchKey, triggerPlayerId, seat.getPlayerId(), checkSeatNo,
-                    power, vpCost, "PENDING", seqNo++, isTaklonsPI,
+                    effectivePower, vpCost, "PENDING", seqNo++, isTaklonsPI,
                     isFirstOffer ? followUpType : null,
                     isFirstOffer ? followUpData : null);
             isFirstOffer = false;
             pendingOffers.add(offer);
-            log.info("[LEECH] 수동 결정 대기: player={}, power={}, vpCost={}", seat.getPlayerId(), power, vpCost);
+            log.info("[LEECH] 수동 결정 대기: player={}, effectivePower={}, vpCost={}, chargeable={}", seat.getPlayerId(), effectivePower, vpCost, chargeablePower);
         }
 
         if (pendingOffers.isEmpty()) {
@@ -164,8 +205,8 @@ public class PowerLeechService {
                 actionService.advanceTurnAndBroadcast(game);
             }
         } else {
-            // 첫 번째 PENDING offer에게 LEECH_OFFERED 브로드캐스트
-            broadcastLeechOffered(gameId, batchKey, pendingOffers, allStates);
+            // 모든 PENDING offer를 동시에 브로드캐스트 (각 플레이어가 독립적으로 결정)
+            broadcastLeechOfferedAll(gameId, batchKey, pendingOffers);
         }
     }
 
@@ -200,37 +241,34 @@ public class PowerLeechService {
         }
         leechOfferRepository.save(offer);
 
-        // 다음 PENDING offer 탐색
-        GameLeechOffer nextPending = leechOfferRepository
+        // 남은 PENDING offer 확인
+        boolean anyPending = leechOfferRepository
                 .findFirstByGameIdAndBatchKeyAndStatusOrderBySequenceNo(gameId, offer.getBatchKey(), "PENDING")
-                .orElse(null);
+                .isPresent();
 
-        if (nextPending != null) {
-            // 다음 결정자에게 이벤트 전달
-            webSocketService.broadcastLeechDecided(gameId, offer, nextPending);
-        } else {
-            // 배치 완료 → 후속 액션 또는 턴 진행
+        // 개별 결정 브로드캐스트 (allResolved 포함)
+        broadcastLeechDecidedWithStatus(gameId, offer, !anyPending);
+
+        if (!anyPending) {
+            // 모든 결정 완료 → 후속 액션 또는 턴 진행
             String followUpType = leechOfferRepository
                     .findByGameIdAndBatchKeyOrderBySequenceNo(gameId, offer.getBatchKey())
                     .stream().findFirst()
                     .map(GameLeechOffer::getFollowUpType).orElse(null);
+
+            Game game = gameRepository.findById(gameId)
+                    .orElseThrow(() -> new IllegalStateException("게임을 찾을 수 없습니다"));
 
             if (followUpType != null) {
                 String followUpData = leechOfferRepository
                         .findByGameIdAndBatchKeyOrderBySequenceNo(gameId, offer.getBatchKey())
                         .stream().findFirst()
                         .map(GameLeechOffer::getFollowUpData).orElse(null);
-                webSocketService.broadcastLeechDecided(gameId, offer, null);
-                Game game = gameRepository.findById(gameId)
-                        .orElseThrow(() -> new IllegalStateException("게임을 찾을 수 없습니다"));
                 UUID triggerPlayerId = resolveTriggerPlayerId(gameId,
                         game.getCurrentTurnSeatNo() != null ? game.getCurrentTurnSeatNo() : 1);
                 if (triggerPlayerId == null) triggerPlayerId = offer.getTriggerPlayerId();
                 broadcastFollowUp(gameId, triggerPlayerId, followUpType, followUpData);
             } else {
-                Game game = gameRepository.findById(gameId)
-                        .orElseThrow(() -> new IllegalStateException("게임을 찾을 수 없습니다"));
-                webSocketService.broadcastLeechDecided(gameId, offer, null);
                 actionService.advanceTurnAndBroadcast(game);
             }
         }
@@ -272,10 +310,9 @@ public class PowerLeechService {
         return leechOfferRepository.save(offer);
     }
 
-    private void broadcastLeechOffered(UUID gameId, String batchKey,
-                                        List<GameLeechOffer> pendingOffers,
-                                        List<GamePlayerState> allStates) {
-        GameLeechOffer firstPending = pendingOffers.get(0);
+    /** 모든 PENDING offer를 동시 브로드캐스트 (각 플레이어가 독립적으로 결정) */
+    private void broadcastLeechOfferedAll(UUID gameId, String batchKey,
+                                           List<GameLeechOffer> pendingOffers) {
         List<Map<String, Object>> offerList = pendingOffers.stream()
                 .map(o -> {
                     Map<String, Object> m = new java.util.LinkedHashMap<>();
@@ -288,10 +325,20 @@ public class PowerLeechService {
                     return m;
                 }).toList();
 
-        webSocketService.broadcastLeechOffered(gameId, batchKey,
-                firstPending.getId().toString(),
-                firstPending.getReceivePlayerId().toString(),
-                offerList);
+        // 모든 결정자 ID 목록 전달
+        List<String> deciderIds = pendingOffers.stream()
+                .map(o -> o.getReceivePlayerId().toString())
+                .toList();
+
+        webSocketService.broadcastLeechOfferedAll(gameId, batchKey, offerList, deciderIds);
+    }
+
+    private void broadcastLeechDecidedWithStatus(UUID gameId, GameLeechOffer decided, boolean allResolved) {
+        java.util.Map<String, Object> payload = new java.util.LinkedHashMap<>();
+        payload.put("decidedLeechId", decided.getId().toString());
+        payload.put("accepted", "ACCEPTED".equals(decided.getStatus()));
+        payload.put("allResolved", allResolved);
+        webSocketService.broadcast(com.gaiaproject.dto.websocket.GameEvent.of(gameId, "LEECH_DECIDED", payload));
     }
 
     private void broadcastFollowUp(UUID gameId, UUID triggerPlayerId, String followUpType, String followUpData) {

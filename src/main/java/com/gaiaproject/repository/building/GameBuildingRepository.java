@@ -18,9 +18,14 @@ public interface GameBuildingRepository extends JpaRepository<GameBuilding, UUID
     boolean existsByGameIdAndHexQAndHexR(UUID gameId, int hexQ, int hexR);
 
     /**
-     * 특정 헥스의 건물 조회
+     * 특정 헥스의 메인 건물 조회 (란티다 기생 제외)
      */
-    Optional<GameBuilding> findByGameIdAndHexQAndHexR(UUID gameId, int hexQ, int hexR);
+    Optional<GameBuilding> findFirstByGameIdAndHexQAndHexRAndIsLantidsMine(UUID gameId, int hexQ, int hexR, boolean isLantidsMine);
+
+    /**
+     * 특정 헥스의 모든 건물 조회 (란티다 기생 포함)
+     */
+    List<GameBuilding> findAllByGameIdAndHexQAndHexR(UUID gameId, int hexQ, int hexR);
 
     /**
      * 게임의 모든 건물 조회

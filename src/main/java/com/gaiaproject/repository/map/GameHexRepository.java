@@ -36,4 +36,9 @@ public interface GameHexRepository extends JpaRepository<GameHex, GameHex.GameHe
      * 특정 섹터의 헥스 조회
      */
     List<GameHex> findByGameIdAndSectorId(UUID gameId, String sectorId);
+
+    /**
+     * 특정 positionNo의 헥스 삭제
+     */
+    void deleteByGameIdAndPositionNo(UUID gameId, int positionNo);
 }

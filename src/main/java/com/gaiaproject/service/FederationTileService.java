@@ -4,7 +4,7 @@ import com.gaiaproject.domain.entity.federation.GameFederationOffer;
 import com.gaiaproject.domain.enumtype.federation.FederationActionType;
 import com.gaiaproject.domain.enumtype.federation.FederationTileType;
 import com.gaiaproject.repository.federation.GameFederationOfferRepository;
-import jakarta.transaction.Transactional;
+import org.springframework.transaction.annotation.Transactional;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -123,5 +123,17 @@ public class FederationTileService {
     public void resetFederationTiles(UUID gameId) {
         gameFederationOfferRepository.deleteByGameId(gameId);
         setupFederationTiles(gameId);
+    }
+
+    /**
+     * 연방 타일 수량 차감 (static, 외부 서비스에서 호출)
+     */
+    public static void acquireTileFromOffer(GameFederationOfferRepository repo, UUID gameId, FederationTileType tileType) {
+        GameFederationOffer offer = repo.findByGameId(gameId).stream()
+                .filter(o -> o.getFederationTileType() == tileType && o.getQuantity() > 0)
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("해당 연방 타일을 찾을 수 없습니다: " + tileType));
+        offer.decreaseQuantity();
+        repo.save(offer);
     }
 }

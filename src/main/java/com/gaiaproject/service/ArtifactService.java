@@ -8,7 +8,7 @@ import com.gaiaproject.repository.artifact.GameArtifactOfferRepository;
 import com.gaiaproject.repository.player.GamePlayerArtifactRepository;
 import com.gaiaproject.repository.player.GamePlayerFleetProbeRepository;
 import com.gaiaproject.repository.player.GamePlayerStateRepository;
-import jakarta.transaction.Transactional;
+import org.springframework.transaction.annotation.Transactional;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 

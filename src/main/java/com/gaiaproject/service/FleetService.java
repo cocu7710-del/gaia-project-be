@@ -9,7 +9,7 @@ import com.gaiaproject.dto.response.FleetProbeStatusResponse;
 import com.gaiaproject.dto.response.PlaceFleetProbeResponse;
 import com.gaiaproject.repository.player.GamePlayerFleetProbeRepository;
 import com.gaiaproject.repository.player.GamePlayerStateRepository;
-import jakarta.transaction.Transactional;
+import org.springframework.transaction.annotation.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;

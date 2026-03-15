@@ -7,12 +7,18 @@ import com.gaiaproject.domain.enumtype.action.ActionType;
 import com.gaiaproject.domain.enumtype.building.BuildingType;
 import com.gaiaproject.domain.enumtype.federation.FederationTileType;
 import com.gaiaproject.domain.enumtype.player.FactionType;
+import com.gaiaproject.domain.entity.game.Game;
 import com.gaiaproject.dto.request.FactionAbilityRequest;
+import com.gaiaproject.dto.request.ItarsGaiaChoiceRequest;
 import com.gaiaproject.dto.response.FactionAbilityResponse;
+import com.gaiaproject.domain.entity.map.GameHex;
+import com.gaiaproject.domain.enumtype.player.PlanetType;
 import com.gaiaproject.repository.building.GameBuildingRepository;
+import com.gaiaproject.util.HexUtil;
+import com.gaiaproject.repository.map.GameHexRepository;
 import com.gaiaproject.repository.player.GamePlayerFederationTokenRepository;
 import com.gaiaproject.repository.player.GamePlayerStateRepository;
-import jakarta.transaction.Transactional;
+import org.springframework.transaction.annotation.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -49,8 +55,17 @@ public class FactionAbilityService {
 
     private final GamePlayerStateRepository playerStateRepository;
     private final GameBuildingRepository buildingRepository;
+    private final GameHexRepository hexRepository;
     private final GamePlayerFederationTokenRepository federationTokenRepository;
     private final ActionService actionService;
+    private final FederationFormService federationFormService;
+    private final TechTileService techTileService;
+    private final com.gaiaproject.repository.game.GameRepository gameRepository;
+    private final PassService passService;
+    private final GameWebSocketService webSocketService;
+    private final GaiaformingService gaiaformingService;
+    private final PowerLeechService powerLeechService;
+    private final RoundScoringService roundScoringService;
 
     /** 의회 건설 여부 확인 */
     private boolean hasPi(GamePlayerState ps) {
@@ -69,7 +84,7 @@ public class FactionAbilityService {
                 // ── 기본 능력 ──
                 case "BAL_TAKS_CONVERT_GAIAFORMER"  -> handleBaltaksConvert(gameId, playerId, ps, code);
                 case "XENOS_ORE_TO_POWER"           -> handleXenosOreToPower(gameId, playerId, ps, code);
-                case "BESCODS_ADVANCE_LOWEST_TRACK" -> handleBescodsAdvance(gameId, playerId, ps, code);
+                case "BESCODS_ADVANCE_LOWEST_TRACK" -> handleBescodsAdvance(gameId, playerId, ps, code, request);
                 case "SPACE_GIANTS_TERRAFORM_2"     -> handleSpaceGiantsTerraform(gameId, playerId, ps, code);
                 case "GLEENS_JUMP"                  -> handleGleensJump(gameId, playerId, ps, code);
                 // ── PI 능력 ──
@@ -77,7 +92,9 @@ public class FactionAbilityService {
                 case "AMBAS_SWAP"                   -> handleAmbasPiSwap(gameId, playerId, ps, code, request);
                 case "HADSCH_HALLAS_CREDIT_CONVERT" -> handleHadschHallasCreditConvert(gameId, playerId, ps, code, request);
                 case "GLEENS_FEDERATION_TOKEN"      -> handleGleensFederationToken(gameId, playerId, ps, code);
-                case "ITARS_GAIA_TO_TECH_TILE"      -> handleItarsGaiaToTechTile(gameId, playerId, ps, code);
+                case "TINKEROIDS_USE_ACTION"         -> handleTinkeroidsUseAction(gameId, playerId, ps, code);
+                // ITARS_GAIA_TO_TECH_TILE: 라운드 종료 시 자동 처리 (handleItarsRoundEndChoice)
+                case "IVITS_PLACE_STATION"          -> handleIvitsPlaceStation(gameId, playerId, ps, code, request);
                 default -> FactionAbilityResponse.fail(gameId, code, "알 수 없는 능력 코드: " + code);
             };
         } catch (IllegalStateException e) {
@@ -108,16 +125,45 @@ public class FactionAbilityService {
         return FactionAbilityResponse.success(gameId, code, null);
     }
 
-    /** 매드안드로이드: 최저 기술 트랙 +1 (액션) */
-    private FactionAbilityResponse handleBescodsAdvance(UUID gameId, UUID playerId, GamePlayerState ps, String code) {
+    /** 매드안드로이드: 최저 기술 트랙 중 선택한 트랙 +1 (액션, 선언형) */
+    private FactionAbilityResponse handleBescodsAdvance(UUID gameId, UUID playerId, GamePlayerState ps, String code, FactionAbilityRequest request) {
         if (ps.getFactionType() != FactionType.BESCODS) return FactionAbilityResponse.fail(gameId, code, "매드안드로이드만 사용 가능");
         if (ps.isFactionAbilityUsed()) return FactionAbilityResponse.fail(gameId, code, "이번 라운드 이미 사용했습니다");
-        String track = ps.advanceLowestTechTrack();
+
+        String trackCode = request.trackCode();
+        if (trackCode == null || trackCode.isBlank()) {
+            return FactionAbilityResponse.fail(gameId, code, "트랙 코드가 필요합니다");
+        }
+
+        // 선택한 트랙이 최저 레벨인지 검증
+        int minLevel = ps.getLowestTechLevel();
+        int selectedLevel = ps.getTechLevel(trackCode);
+        if (selectedLevel != minLevel) {
+            return FactionAbilityResponse.fail(gameId, code, "최저 레벨 트랙만 선택할 수 있습니다");
+        }
+        if (selectedLevel >= 5) {
+            return FactionAbilityResponse.fail(gameId, code, "이미 최대 레벨입니다");
+        }
+
+        ps.advanceTechTrackFree(trackCode);
+        int newLevel = ps.getTechLevel(trackCode);
+
+        // 트랙 전진 즉시 보상 적용 (QIC, 광석, 파워 등)
+        Game game = gameRepository.findById(gameId)
+                .orElseThrow(() -> new IllegalStateException("게임을 찾을 수 없습니다"));
+        techTileService.applyTechTrackReward(ps, trackCode, newLevel, game.getEconomyTrackOption());
+
+        // 라운드 점수 타일: 연구 트랙 1칸 전진당 VP
+        if (game.getCurrentRound() != null) {
+            roundScoringService.award(gameId, game.getCurrentRound(), ps,
+                    com.gaiaproject.domain.enumtype.rounds.RoundScoringEvent.RESEARCH_ADVANCED, 1);
+        }
+
         ps.markFactionAbilityUsed();
         playerStateRepository.save(ps);
-        log.info("[BESCODS] 최저트랙 전진: player={}, track={}", playerId, track);
+        log.info("[BESCODS] 트랙 전진: player={}, track={}, newLevel={}", playerId, trackCode, newLevel);
         var result = actionService.saveActionAndNextTurn(gameId, playerId, ActionType.FACTION_ABILITY,
-                "{\"abilityCode\":\"" + code + "\",\"track\":\"" + track + "\"}");
+                "{\"abilityCode\":\"" + code + "\",\"track\":\"" + trackCode + "\"}");
         return FactionAbilityResponse.success(gameId, code, result.nextTurnSeatNo());
     }
 
@@ -156,7 +202,7 @@ public class FactionAbilityService {
         if (req.trackCode() == null) return FactionAbilityResponse.fail(gameId, code, "전진할 트랙을 지정해야 합니다");
 
         // 연구소 확인 및 교역소로 다운그레이드
-        Optional<GameBuilding> bOpt = buildingRepository.findByGameIdAndHexQAndHexR(gameId, req.hexQ(), req.hexR());
+        Optional<GameBuilding> bOpt = buildingRepository.findFirstByGameIdAndHexQAndHexRAndIsLantidsMine(gameId, req.hexQ(), req.hexR(), false);
         if (bOpt.isEmpty() || !bOpt.get().getPlayerId().equals(playerId))
             return FactionAbilityResponse.fail(gameId, code, "해당 위치에 본인 건물이 없습니다");
         if (bOpt.get().getBuildingType() != BuildingType.RESEARCH_LAB)
@@ -170,15 +216,30 @@ public class FactionAbilityService {
         ps.addResearchLabToStock();
         ps.decreaseStockTradingStation();
 
-        // 지식 트랙 1칸 전진 (지식 소모 없음)
+        // 지식 트랙 1칸 전진 (지식 소모 없음) + 즉시 보상
         ps.advanceTechTrackNoKnowledge(trackCodeToField(req.trackCode()));
+        int firakNewLevel = ps.getTechLevel(req.trackCode());
+        Game game = gameRepository.findById(gameId).orElseThrow();
+        techTileService.applyTechTrackReward(ps, req.trackCode(), firakNewLevel, game.getEconomyTrackOption());
+        if (game.getCurrentRound() != null) {
+            roundScoringService.award(gameId, game.getCurrentRound(), ps,
+                    com.gaiaproject.domain.enumtype.rounds.RoundScoringEvent.RESEARCH_ADVANCED, 1);
+        }
+
         ps.markFactionAbilityUsed();
         playerStateRepository.save(ps);
-        log.info("[FIRAKS PI] RL→TS 다운그레이드 + {} 전진: player={}", req.trackCode(), playerId);
+        log.info("[FIRAKS PI] RL→TS 다운그레이드 + {} 전진 (lv{}): player={}", req.trackCode(), firakNewLevel, playerId);
 
-        var result = actionService.saveActionAndNextTurn(gameId, playerId, ActionType.FACTION_ABILITY,
+        // 액션 저장 (턴 진행은 리치 해소 후)
+        actionService.saveActionOnly(gameId, playerId, ActionType.FACTION_ABILITY,
                 "{\"abilityCode\":\"" + code + "\",\"track\":\"" + req.trackCode() + "\"}");
-        return FactionAbilityResponse.success(gameId, code, result.nextTurnSeatNo());
+
+        // 파워 리치 처리 (교역소로 다운그레이드 = 파워값 2 건물)
+        List<com.gaiaproject.domain.entity.building.GameBuilding> allBuildings = buildingRepository.findByGameId(gameId);
+        powerLeechService.createBatchAndProcess(game, playerId, req.hexQ(), req.hexR(),
+                BuildingType.TRADING_STATION, allBuildings, null, null);
+
+        return FactionAbilityResponse.success(gameId, code, null);
     }
 
     /**
@@ -192,7 +253,7 @@ public class FactionAbilityService {
         if (req.hexQ() == null || req.hexR() == null) return FactionAbilityResponse.fail(gameId, code, "교환할 광산 위치를 지정해야 합니다");
 
         // 광산 확인
-        Optional<GameBuilding> mineOpt = buildingRepository.findByGameIdAndHexQAndHexR(gameId, req.hexQ(), req.hexR());
+        Optional<GameBuilding> mineOpt = buildingRepository.findFirstByGameIdAndHexQAndHexRAndIsLantidsMine(gameId, req.hexQ(), req.hexR(), false);
         if (mineOpt.isEmpty() || !mineOpt.get().getPlayerId().equals(playerId) || mineOpt.get().getBuildingType() != BuildingType.MINE)
             return FactionAbilityResponse.fail(gameId, code, "해당 위치에 본인 광산이 없습니다");
 
@@ -281,21 +342,177 @@ public class FactionAbilityService {
         return FactionAbilityResponse.success(gameId, code, result.nextTurnSeatNo());
     }
 
-    /**
-     * 아이타 PI: 4 가이아파워 영구 제거 → 기본 기술 타일 획득 (FE에서 타일 선택)
-     * 이 메서드는 "가이아 토큰 차감" 처리만 함. 타일 획득은 별도 API로 처리.
-     */
-    private FactionAbilityResponse handleItarsGaiaToTechTile(UUID gameId, UUID playerId, GamePlayerState ps, String code) {
-        if (ps.getFactionType() != FactionType.ITARS) return FactionAbilityResponse.fail(gameId, code, "아이타만 사용 가능");
-        if (!hasPi(ps)) return FactionAbilityResponse.fail(gameId, code, "행성 의회 건설 후 사용 가능합니다");
-        if (ps.getGaiaPower() < 4) return FactionAbilityResponse.fail(gameId, code, "가이아 구역 파워가 4개 미만입니다 (현재: " + ps.getGaiaPower() + ")");
+    /** 팅커로이드: 선택된 액션 사용 (메인 액션, 턴 소모) */
+    private FactionAbilityResponse handleTinkeroidsUseAction(UUID gameId, UUID playerId, GamePlayerState ps, String code) {
+        if (ps.getFactionType() != FactionType.TINKEROIDS) return FactionAbilityResponse.fail(gameId, code, "팅커로이드만 사용 가능");
+        String currentAction = ps.getTinkeroidsCurrentAction();
+        if (currentAction == null) return FactionAbilityResponse.fail(gameId, code, "사용 가능한 액션이 없습니다");
 
-        // 4 가이아파워 영구 제거
-        ps.removeGaiaPower(4);
+        // 테라포밍 액션은 선언형 (FE에서 pending으로 처리) → 여기서는 비테라 액션만
+        switch (currentAction) {
+            case "TINK_POWER_4" -> ps.chargePower(4);
+            case "TINK_QIC_1" -> ps.addQic(1);
+            case "TINK_KNOWLEDGE_3" -> ps.addKnowledge(3);
+            case "TINK_QIC_2" -> { ps.addQic(1); ps.addQic(1); }
+            case "TINK_TERRAFORM_1", "TINK_TERRAFORM_3" -> {
+                // 테라포밍은 FE에서 선언형으로 처리 (광산 건설과 함께 확정)
+                // 여기서는 사용 마킹만
+            }
+            default -> { return FactionAbilityResponse.fail(gameId, code, "알 수 없는 액션: " + currentAction); }
+        }
+
+        ps.useTinkeroidsCurrentAction();
         playerStateRepository.save(ps);
-        log.info("[ITARS PI] 가이아 4 제거 → 기본 기술타일 선택 대기: player={}", playerId);
-        // 타일 선택은 FE에서 TechTilePickerPanel을 통해 처리
-        return FactionAbilityResponse.success(gameId, code, null); // 프리 액션 (타일 선택 후 확정)
+        log.info("[TINKEROIDS] 액션 사용: player={}, action={}", playerId, currentAction);
+
+        var result = actionService.saveActionAndNextTurn(gameId, playerId, ActionType.FACTION_ABILITY,
+                "{\"abilityCode\":\"TINKEROIDS_USE_ACTION\",\"action\":\"" + currentAction + "\"}");
+        return FactionAbilityResponse.success(gameId, code, result.nextTurnSeatNo());
+    }
+
+    /**
+     * 팅커로이드 PI: 라운드 시작 시 액션 타일 선택.
+     * TINKEROIDS_ACTION_PHASE에서만 호출 가능.
+     */
+    public FactionAbilityResponse handleTinkeroidsActionChoice(UUID gameId, com.gaiaproject.dto.request.TinkeroidsActionChoiceRequest request) {
+        Game game = gameRepository.findById(gameId)
+                .orElseThrow(() -> new IllegalArgumentException("게임을 찾을 수 없습니다"));
+        if (!"TINKEROIDS_ACTION_PHASE".equals(game.getGamePhase())) {
+            return FactionAbilityResponse.fail(gameId, "TINKEROIDS_ACTION", "팅커로이드 액션 선택 단계가 아닙니다");
+        }
+
+        UUID playerId = request.playerId();
+        GamePlayerState ps = playerStateRepository.findByGameIdAndPlayerId(gameId, playerId)
+                .orElseThrow(() -> new IllegalStateException("플레이어 상태를 찾을 수 없습니다"));
+
+        if (ps.getFactionType() != FactionType.TINKEROIDS) {
+            return FactionAbilityResponse.fail(gameId, "TINKEROIDS_ACTION", "팅커로이드만 사용 가능");
+        }
+
+        String actionCode = request.actionCode();
+        if (ps.isTinkeroidsActionUsed(actionCode)) {
+            return FactionAbilityResponse.fail(gameId, "TINKEROIDS_ACTION", "이미 사용한 액션입니다: " + actionCode);
+        }
+
+        // 유효한 액션인지 확인 (효과는 PLAYING 중 사용 시 적용)
+        if (!List.of("TINK_TERRAFORM_1","TINK_POWER_4","TINK_QIC_1","TINK_TERRAFORM_3","TINK_KNOWLEDGE_3","TINK_QIC_2").contains(actionCode)) {
+            return FactionAbilityResponse.fail(gameId, "TINKEROIDS_ACTION", "알 수 없는 액션: " + actionCode);
+        }
+
+        ps.selectTinkeroidsAction(actionCode);
+        playerStateRepository.save(ps);
+
+        log.info("[TINKEROIDS] 액션 선택: player={}, action={}, round={}", playerId, actionCode, game.getCurrentRound());
+
+        // 다음 단계로 진행 (아이타 체크 또는 라운드 시작)
+        passService.continueTinkeroidsToNextPhase(gameId);
+
+        return FactionAbilityResponse.success(gameId, "TINKEROIDS_ACTION", null);
+    }
+
+    /**
+     * 아이타 PI: 라운드 종료 시 가이아→기술타일 선택 처리.
+     * ITARS_GAIA_PHASE에서만 호출 가능.
+     */
+    public FactionAbilityResponse handleItarsRoundEndChoice(UUID gameId, ItarsGaiaChoiceRequest request) {
+        Game game = gameRepository.findById(gameId)
+                .orElseThrow(() -> new IllegalArgumentException("게임을 찾을 수 없습니다"));
+        if (!"ITARS_GAIA_PHASE".equals(game.getGamePhase())) {
+            return FactionAbilityResponse.fail(gameId, "ITARS_GAIA_CHOICE", "아이타 가이아 선택 단계가 아닙니다");
+        }
+
+        UUID playerId = request.playerId();
+        GamePlayerState ps = playerStateRepository.findByGameIdAndPlayerId(gameId, playerId)
+                .orElseThrow(() -> new IllegalStateException("플레이어 상태를 찾을 수 없습니다"));
+
+        if ("TAKE_TILE".equals(request.action())) {
+            if (ps.getGaiaPower() < 4) {
+                return FactionAbilityResponse.fail(gameId, "ITARS_GAIA_CHOICE", "가이아 파워 부족");
+            }
+            ps.removeGaiaPower(4);
+            playerStateRepository.save(ps);
+
+            try {
+                techTileService.acquireTileForBuilding(gameId, playerId,
+                        request.tileCode(), request.techTrackCode(), game.getEconomyTrackOption());
+            } catch (IllegalStateException e) {
+                // 실패 시 가이아 복원
+                ps.addGaiaPower(4);
+                playerStateRepository.save(ps);
+                return FactionAbilityResponse.fail(gameId, "ITARS_GAIA_CHOICE", e.getMessage());
+            }
+
+            log.info("[ITARS] 가이아 4 → 기술타일: player={}, tile={}", playerId, request.tileCode());
+
+            // 아직 4개 이상 남아있으면 다시 선택 기회
+            if (ps.getGaiaPower() >= 4) {
+                webSocketService.broadcastItarsGaiaChoice(gameId, playerId, ps.getGaiaPower() / 4);
+                return FactionAbilityResponse.success(gameId, "ITARS_GAIA_CHOICE", null);
+            }
+        }
+
+        // SKIP이거나 가이아 부족: 잔여 가이아 복귀 + 라운드 시작
+        gaiaformingService.returnGaiaPowerForPlayer(gameId, playerId);
+
+        game.setGamePhase("PLAYING");
+        gameRepository.save(game);
+
+        webSocketService.broadcastRoundStarted(gameId, game.getCurrentRound());
+        log.info("[ITARS] 가이아 선택 완료, 라운드 {} 시작", game.getCurrentRound());
+        return FactionAbilityResponse.success(gameId, "ITARS_GAIA_CHOICE", null);
+    }
+
+
+    /** 하이브 PI: 우주정거장 배치 (라운드당 1회, 빈 헥스에만 배치 가능) */
+    private FactionAbilityResponse handleIvitsPlaceStation(UUID gameId, UUID playerId, GamePlayerState ps, String code, FactionAbilityRequest request) {
+        if (ps.getFactionType() != FactionType.IVITS) return FactionAbilityResponse.fail(gameId, code, "하이브만 사용 가능");
+        if (!hasPi(ps)) return FactionAbilityResponse.fail(gameId, code, "행성 의회 건설 후 사용 가능합니다");
+        if (ps.isFactionAbilityUsed()) return FactionAbilityResponse.fail(gameId, code, "이번 라운드 이미 사용했습니다");
+
+        Integer hexQ = request.hexQ();
+        Integer hexR = request.hexR();
+        if (hexQ == null || hexR == null) return FactionAbilityResponse.fail(gameId, code, "헥스 좌표가 필요합니다");
+
+        // 헥스 존재 확인
+        GameHex hex = hexRepository.findByGameIdAndHexQAndHexR(gameId, hexQ, hexR)
+                .orElse(null);
+        if (hex == null) return FactionAbilityResponse.fail(gameId, code, "유효하지 않은 좌표입니다");
+
+        // 빈 헥스(EMPTY)만 가능 - 행성, 차원변형, 가이아 등 불가
+        if (hex.getPlanetType() != PlanetType.EMPTY) {
+            return FactionAbilityResponse.fail(gameId, code, "빈 우주 헥스에만 우주정거장을 배치할 수 있습니다");
+        }
+
+        // 이미 건물이 있는지 확인
+        if (buildingRepository.existsByGameIdAndHexQAndHexR(gameId, hexQ, hexR)) {
+            return FactionAbilityResponse.fail(gameId, code, "이미 건물이 있는 위치입니다");
+        }
+
+        // 항법 거리 체크: 자기 건물(우주정거장 포함)로부터 항법 거리 이내
+        int navRange = switch (ps.getTechNavigation()) {
+            case 0 -> 1; case 1 -> 1; case 2 -> 2; case 3 -> 2; case 4 -> 3; default -> 4;
+        };
+        List<GameBuilding> myBuildings = buildingRepository.findByGameIdAndPlayerId(gameId, playerId);
+        boolean inRange = myBuildings.stream().anyMatch(b ->
+                HexUtil.distance(b.getHexQ(), b.getHexR(), hexQ, hexR) <= navRange);
+        if (!inRange) {
+            return FactionAbilityResponse.fail(gameId, code, "항법 거리 밖입니다 (현재 거리: " + navRange + ")");
+        }
+
+        // 우주정거장 배치
+        GameBuilding station = GameBuilding.place(gameId, playerId, hexQ, hexR, BuildingType.SPACE_STATION);
+        buildingRepository.save(station);
+
+        ps.markFactionAbilityUsed();
+        playerStateRepository.save(ps);
+        log.info("[IVITS PI] 우주정거장 배치: player={}, hex=({},{})", playerId, hexQ, hexR);
+
+        // 인접 연방에 자동 편입
+        federationFormService.autoJoinFederation(gameId, playerId, hexQ, hexR);
+
+        var result = actionService.saveActionAndNextTurn(gameId, playerId, ActionType.FACTION_ABILITY,
+                "{\"abilityCode\":\"" + code + "\",\"hexQ\":" + hexQ + ",\"hexR\":" + hexR + "}");
+        return FactionAbilityResponse.success(gameId, code, result.nextTurnSeatNo());
     }
 
     // ═══════════════════════════════════════════════════════════

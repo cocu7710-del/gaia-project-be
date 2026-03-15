@@ -125,10 +125,12 @@ public class TechTileService {
         GameTechOffer offer = gameTechOfferRepository.findByGameIdAndTechTileCode(gameId, techTileCode)
                 .orElseThrow(() -> new IllegalStateException("해당 기술 타일이 없습니다: " + tileCode));
 
-        if (offer.getTakenByPlayerId() != null)
-            throw new IllegalStateException("이미 가져간 기술 타일입니다: " + tileCode);
+        // 고급 기술 타일은 1명만 가져갈 수 있음, 기본 타일은 중복 가능 (본인 제외)
+        boolean isAdvanced = tileCode.startsWith("ADV_");
+        if (isAdvanced && offer.getTakenByPlayerId() != null)
+            throw new IllegalStateException("이미 가져간 고급 기술 타일입니다: " + tileCode);
 
-        // 3. 중복 소유 확인
+        // 본인 중복 소유 불가
         if (playerTechTileRepository.existsByGameIdAndPlayerIdAndTechTileCode(gameId, playerId, tileCode))
             throw new IllegalStateException("이미 보유 중인 기술 타일입니다: " + tileCode);
 
@@ -427,7 +429,7 @@ public class TechTileService {
      * - 수입:     1→2돈+1파워순환, 2→1광+2돈+2파워순환, 3/4→옵션A/B에 따라 다름
      * - 지식:     1~4→지식수입(라운드 수입 단계 처리, 즉각 보상 없음)
      */
-    private void applyTechTrackReward(GamePlayerState ps, String trackCode, int newLevel, EconomyTrackOption economyOption) {
+    public void applyTechTrackReward(GamePlayerState ps, String trackCode, int newLevel, EconomyTrackOption economyOption) {
         if (newLevel < 1 || newLevel > 4) return;
 
         // 모든 트랙 공통: 2→3 전진 시 3파워 순환

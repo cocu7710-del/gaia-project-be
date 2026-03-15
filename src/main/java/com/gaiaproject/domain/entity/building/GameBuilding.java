@@ -39,6 +39,7 @@ public class GameBuilding {
 
     // 란티다 전용: 타인 건물 위치에 지은 광산 (업그레이드 불가)
     @Column(name = "is_lantids_mine", nullable = false)
+    @com.fasterxml.jackson.annotation.JsonProperty("isLantidsMine")
     private boolean isLantidsMine = false;
 
     /**

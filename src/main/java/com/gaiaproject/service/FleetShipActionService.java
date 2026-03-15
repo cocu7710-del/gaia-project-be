@@ -47,6 +47,9 @@ public class FleetShipActionService {
     private final GameTechOfferRepository techOfferRepository;
     private final GamePlayerFleetProbeRepository fleetProbeRepository;
     private final ActionService actionService;
+    private final TechTileService techTileService;
+    private final RoundScoringService roundScoringService;
+    private final com.gaiaproject.repository.game.GameRepository gameRepository;
 
     /** 함대 선박 특수 액션 실행 */
     public FleetShipActionResponse executeAction(UUID gameId, FleetShipActionRequest request) {
@@ -75,13 +78,13 @@ public class FleetShipActionService {
                 case "ECLIPSE_MINE" -> executeEclipseMine(gameId, playerId, ps, actionCode, request.hexQ(), request.hexR());
 
                 // === REBELLION ===
-                case "REBELLION_TECH" -> executeRebellionTech(gameId, playerId, ps, actionCode, request.trackCode());
+                case "REBELLION_TECH" -> executeRebellionTech(gameId, playerId, ps, actionCode, request.trackCode(), request.techTrackCode());
                 case "REBELLION_UPGRADE" -> executeRebellionUpgrade(gameId, playerId, ps, actionCode, request.hexQ(), request.hexR());
                 case "REBELLION_CONVERT" -> executeRebellionConvert(gameId, playerId, ps, actionCode);
 
                 // === TWILIGHT ===
                 case "TWILIGHT_FED" -> executeTwilightFed(gameId, playerId, ps, actionCode);
-                case "TWILIGHT_UPGRADE" -> executeTwilightUpgrade(gameId, playerId, ps, actionCode, request.hexQ(), request.hexR());
+                case "TWILIGHT_UPGRADE" -> executeTwilightUpgrade(gameId, playerId, ps, actionCode, request.hexQ(), request.hexR(), request.trackCode(), request.techTrackCode());
                 case "TWILIGHT_NAV" -> executeTwilightNav(gameId, playerId, ps, actionCode);
                 case "TWILIGHT_ARTIFACT" -> executeTwilightArtifact(gameId, playerId, ps, actionCode);
 
@@ -174,7 +177,7 @@ public class FleetShipActionService {
             return FleetShipActionResponse.fail(gameId, code, "기술 트랙 코드가 필요합니다");
         ps.spendPower(2);
         ps.spendKnowledge(2);
-        advanceTrack(ps, trackCode);
+        advanceTrack(gameId, ps, trackCode);
         playerStateRepository.save(ps);
         ConfirmActionResponse result = endTurn(gameId, playerId, code);
         log.info("[함대] {}: game={}, player={}, track={}", code, gameId, playerId, trackCode);
@@ -210,39 +213,26 @@ public class FleetShipActionService {
     // REBELLION
     // ===========================
 
-    /** REBELLION_TECH: QIC 3 → 기본 기술 타일 1장 획득 (tileCode는 trackCode 필드로 전달) */
-    private FleetShipActionResponse executeRebellionTech(UUID gameId, UUID playerId, GamePlayerState ps, String code, String tileCode) {
+    /** REBELLION_TECH: QIC 3 → 기본 기술 타일 1장 획득 + 해당 트랙 1칸 전진 */
+    private FleetShipActionResponse executeRebellionTech(UUID gameId, UUID playerId, GamePlayerState ps, String code, String tileCode, String techTrackCode) {
         if (tileCode == null || tileCode.isBlank())
             return FleetShipActionResponse.fail(gameId, code, "기술 타일 코드가 필요합니다");
 
-        TechTileCode techTileCode;
-        try {
-            techTileCode = TechTileCode.valueOf(tileCode);
-        } catch (IllegalArgumentException e) {
-            return FleetShipActionResponse.fail(gameId, code, "알 수 없는 기술 타일 코드: " + tileCode);
-        }
-
-        GameTechOffer offer = techOfferRepository.findByGameIdAndTechTileCode(gameId, techTileCode)
-                .orElse(null);
-        if (offer == null) return FleetShipActionResponse.fail(gameId, code, "해당 기술 타일이 이 게임에 없습니다");
-        if (offer.getTakenByPlayerId() != null)
-            return FleetShipActionResponse.fail(gameId, code, "이미 가져간 기술 타일입니다");
-
+        // QIC 3 소모
         ps.spendQic(3);
         playerStateRepository.save(ps);
 
-        offer.take(playerId);
-        techOfferRepository.save(offer);
-
-        GamePlayerTechTile playerTile = GamePlayerTechTile.builder()
-                .gameId(gameId)
-                .playerId(playerId)
-                .techTileCode(tileCode)
-                .build();
-        techTileRepository.save(playerTile);
+        // 기술 타일 획득 + 트랙 1칸 전진 (연구소/아카데미와 동일한 로직)
+        try {
+            var game = gameRepository.findById(gameId)
+                    .orElseThrow(() -> new IllegalStateException("게임을 찾을 수 없습니다"));
+            techTileService.acquireTileForBuilding(gameId, playerId, tileCode, techTrackCode, game.getEconomyTrackOption());
+        } catch (IllegalStateException e) {
+            return FleetShipActionResponse.fail(gameId, code, e.getMessage());
+        }
 
         ConfirmActionResponse result = endTurn(gameId, playerId, code);
-        log.info("[함대] {}: game={}, player={}, tile={}", code, gameId, playerId, tileCode);
+        log.info("[함대] {}: game={}, player={}, tile={}, track={}", code, gameId, playerId, tileCode, techTrackCode);
         return FleetShipActionResponse.success(gameId, code, 0, result.nextTurnSeatNo(), true);
     }
 
@@ -251,7 +241,7 @@ public class FleetShipActionService {
                                                               Integer hexQ, Integer hexR) {
         if (hexQ == null || hexR == null) return FleetShipActionResponse.fail(gameId, code, "헥스 좌표가 필요합니다");
 
-        GameBuilding building = buildingRepository.findByGameIdAndHexQAndHexR(gameId, hexQ, hexR).orElse(null);
+        GameBuilding building = buildingRepository.findFirstByGameIdAndHexQAndHexRAndIsLantidsMine(gameId, hexQ, hexR, false).orElse(null);
         if (building == null) return FleetShipActionResponse.fail(gameId, code, "건물을 찾을 수 없습니다");
         if (!building.getPlayerId().equals(playerId)) return FleetShipActionResponse.fail(gameId, code, "본인 건물이 아닙니다");
         if (building.getBuildingType() != BuildingType.MINE) return FleetShipActionResponse.fail(gameId, code, "광산만 업그레이드 가능합니다");
@@ -298,12 +288,13 @@ public class FleetShipActionService {
         return FleetShipActionResponse.success(gameId, code, 2, result.nextTurnSeatNo(), true);
     }
 
-    /** TWILIGHT_UPGRADE: 파워 3 + 광석 2 → 자신의 교역소를 연구소로 업그레이드 */
+    /** TWILIGHT_UPGRADE: 파워 3 + 광석 2 → 자신의 교역소를 연구소로 업그레이드 + 기술 타일 획득 */
     private FleetShipActionResponse executeTwilightUpgrade(UUID gameId, UUID playerId, GamePlayerState ps, String code,
-                                                             Integer hexQ, Integer hexR) {
+                                                             Integer hexQ, Integer hexR,
+                                                             String tileCode, String techTrackCode) {
         if (hexQ == null || hexR == null) return FleetShipActionResponse.fail(gameId, code, "헥스 좌표가 필요합니다");
 
-        GameBuilding building = buildingRepository.findByGameIdAndHexQAndHexR(gameId, hexQ, hexR).orElse(null);
+        GameBuilding building = buildingRepository.findFirstByGameIdAndHexQAndHexRAndIsLantidsMine(gameId, hexQ, hexR, false).orElse(null);
         if (building == null) return FleetShipActionResponse.fail(gameId, code, "건물을 찾을 수 없습니다");
         if (!building.getPlayerId().equals(playerId)) return FleetShipActionResponse.fail(gameId, code, "본인 건물이 아닙니다");
         if (building.getBuildingType() != BuildingType.TRADING_STATION)
@@ -318,6 +309,16 @@ public class FleetShipActionService {
 
         building.upgrade(BuildingType.RESEARCH_LAB);
         buildingRepository.save(building);
+
+        // 기술 타일 획득 (연구소 업그레이드이므로)
+        if (tileCode != null && !tileCode.isBlank()) {
+            try {
+                var game = gameRepository.findById(gameId).orElseThrow();
+                techTileService.acquireTileForBuilding(gameId, playerId, tileCode, techTrackCode, game.getEconomyTrackOption());
+            } catch (IllegalStateException e) {
+                return FleetShipActionResponse.fail(gameId, code, "기술 타일 획득 실패: " + e.getMessage());
+            }
+        }
 
         ConfirmActionResponse result = endTurn(gameId, playerId, code);
         log.info("[함대] {}: game={}, player={}, hex=({},{})", code, gameId, playerId, hexQ, hexR);
@@ -348,8 +349,8 @@ public class FleetShipActionService {
     // 헬퍼
     // ===========================
 
-    /** 기술 트랙 1단계 전진 (지식 소모 없음, 코드만 받아 해당 트랙 +1) */
-    private void advanceTrack(GamePlayerState ps, String trackCode) {
+    /** 기술 트랙 1단계 전진 (지식 소모 없음, 코드만 받아 해당 트랙 +1 + 즉시 보상 + 라운드 점수) */
+    private void advanceTrack(UUID gameId, GamePlayerState ps, String trackCode) {
         switch (trackCode) {
             case "TERRA_FORMING" -> { if (ps.getTechTerraforming() >= 5) throw new IllegalStateException("이미 최대 레벨입니다"); }
             case "NAVIGATION"    -> { if (ps.getTechNavigation() >= 5)   throw new IllegalStateException("이미 최대 레벨입니다"); }
@@ -367,6 +368,16 @@ public class FleetShipActionService {
             case "GAIA_FORMING"  -> incrementField(ps, "techGaia");
             case "ECONOMY"       -> incrementField(ps, "techEconomy");
             case "SCIENCE"       -> incrementField(ps, "techScience");
+        }
+        // 즉시 보상 적용
+        int newLevel = ps.getTechLevel(trackCode);
+        var game = gameRepository.findById(gameId).orElse(null);
+        if (game != null) {
+            techTileService.applyTechTrackReward(ps, trackCode, newLevel, game.getEconomyTrackOption());
+            if (game.getCurrentRound() != null) {
+                roundScoringService.award(gameId, game.getCurrentRound(), ps,
+                        com.gaiaproject.domain.enumtype.rounds.RoundScoringEvent.RESEARCH_ADVANCED, 1);
+            }
         }
     }
 
