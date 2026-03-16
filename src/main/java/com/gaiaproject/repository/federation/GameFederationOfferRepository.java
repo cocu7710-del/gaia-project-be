@@ -12,5 +12,7 @@ public interface GameFederationOfferRepository extends JpaRepository<GameFederat
 
     List<GameFederationOffer> findByGameId(UUID gameId);
 
+    java.util.Optional<GameFederationOffer> findByGameIdAndPosition(UUID gameId, Integer position);
+
     void deleteByGameId(UUID gameId);
 }

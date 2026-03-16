@@ -81,6 +81,12 @@ public class IncomeService {
             player.returnConvertedGaiaformers();   // 발타크 변환 가이아포머 반환
             resetTechTileActions(gameId, player.getPlayerId()); // ACTION 타일 초기화
             applyTerransGaiaIncome(player);        // 테란 PI: 가이아 구역 파워 → 자원
+            // 글린: QIC 아카데미 건설 여부 플래그 설정 (addQic에서 사용)
+            if (player.getFactionType() == FactionType.GLEENS || (player.getFactionType() == null)) {
+                boolean hasQicAcad = gameBuildingRepository.countByGameIdAndPlayerIdAndBuildingTypeAndAcademyType(
+                        gameId, player.getPlayerId(), BuildingType.ACADEMY, AcademyType.QIC) > 0;
+                player.setGleensHasQicAcademy(hasQicAcad);
+            }
             applyIncomeToPlayer(gameId, player, economyOption);
             playerStateRepository.saveAndFlush(player);  // 명시적 저장 + 즉시 반영
         }
@@ -190,18 +196,47 @@ public class IncomeService {
      * 테란 PI: 수입 전 가이아 구역 파워 → 자원 변환
      * 1 가이아파워 = 1 크레딧, 3 가이아파워 = 1 광석, 4 가이아파워 = 1 QIC, 4 가이아파워 = 1 지식
      */
+    /**
+     * 테란 PI: 가이아 토큰 → 자원 변환
+     * 수입 단계에서는 자동 변환하지 않음 — FE에서 수동 배분 후 API 호출
+     * (가이아 토큰이 없거나 PI 미건설이면 스킵)
+     */
     private void applyTerransGaiaIncome(GamePlayerState player) {
-        if (player.getFactionType() != FactionType.TERRANS) return;
-        if (player.getStockPlanetaryInstitute() > 0) return; // PI 미건설
-        int gaia = player.getGaiaPower();
-        if (gaia <= 0) return;
-        player.addCredit(gaia);
-        player.addOre(gaia / 3);
-        player.addQic(gaia / 4);
-        player.addKnowledge(gaia / 4);
-        log.info("[TERRANS PI] 가이아 수입: gaia={}, credit+{}, ore+{}, qic+{}, knowledge+{}",
-                gaia, gaia, gaia / 3, gaia / 4, gaia / 4);
+        // 자동 변환 제거 — FE 다이얼로그에서 수동 처리
+        // applyTerransGaiaConvert()로 이동
     }
+
+    /**
+     * 테란 PI: FE에서 선택한 배분으로 가이아 토큰 → 자원 변환
+     * @param credits 크레딧으로 변환할 토큰 수 (1:1)
+     * @param ores 광석으로 변환할 묶음 수 (3:1)
+     * @param qics QIC로 변환할 묶음 수 (4:1)
+     * @param knowledges 지식으로 변환할 묶음 수 (4:1)
+     */
+    public void applyTerransGaiaConvert(UUID gameId, UUID playerId, int credits, int ores, int qics, int knowledges) {
+        GamePlayerState player = playerStateRepository.findByGameIdAndPlayerId(gameId, playerId)
+                .orElseThrow(() -> new IllegalStateException("플레이어 상태를 찾을 수 없습니다"));
+
+        int totalTokens = credits + ores * 3 + qics * 4 + knowledges * 4;
+        if (totalTokens > player.getGaiaPower()) {
+            throw new IllegalStateException("가이아 토큰이 부족합니다. 보유: " + player.getGaiaPower() + ", 요청: " + totalTokens);
+        }
+
+        player.addCredit(credits);
+        player.addOre(ores);
+        player.addQic(qics);
+        player.addKnowledge(knowledges);
+        playerStateRepository.save(player);
+        log.info("[TERRANS PI] 가이아 수동 변환: gaia={}, c+{}, o+{}, q+{}, k+{}",
+                player.getGaiaPower(), credits, ores, qics, knowledges);
+
+        // 테란 변환 완료 → 다음 단계 진행 (팅커→아이타→라운드시작)
+        passService.continueAfterTerransGaia(gameId);
+    }
+
+    @org.springframework.context.annotation.Lazy
+    @org.springframework.beans.factory.annotation.Autowired
+    private PassService passService;
 
     /**
      * ACTION 타입 기술 타일 사용 여부 초기화 (라운드 시작 시)
@@ -262,10 +297,17 @@ public class IncomeService {
      * 건물 수입 적용 (배치된 건물 기준)
      */
     private void applyBuildingIncome(GamePlayerState player) {
+        // 종족 타입 (null이면 seat에서 조회)
+        FactionType buildFaction = player.getFactionType();
+        if (buildFaction == null) {
+            buildFaction = gameSeatRepository.findByGameIdAndSeatNo(player.getGameId(), player.getSeatNo())
+                    .map(GameSeat::getFactionType).orElse(null);
+        }
+
         // 지식 아카데미 수 조회 (건물 DB에서)
         int knowledgeAcademyCount = gameBuildingRepository.countByGameIdAndPlayerIdAndBuildingTypeAndAcademyType(
                 player.getGameId(), player.getPlayerId(), BuildingType.ACADEMY, AcademyType.KNOWLEDGE);
-        boolean isItars = player.getFactionType() == FactionType.ITARS;
+        boolean isItars = buildFaction == FactionType.ITARS;
 
         ResourcesVo buildingIncome = BuildingIncomeVo.getTotalBuildingIncome(
                 player.getStockMine(),
@@ -278,11 +320,11 @@ public class IncomeService {
 
         player.applyIncome(buildingIncome);
 
-        // 하이브/제노스 PI 수입: 1 QIC
-        if ((player.getFactionType() == FactionType.IVITS || player.getFactionType() == FactionType.XENOS)
-                && player.getStockPlanetaryInstitute() == 0) {
-            player.addQic(1);
-            log.debug("[{} PI] QIC +1 수입 적용", player.getFactionType());
+        // 종족별 PI 수입 (파워차징 + 토큰/QIC/광석 등)
+        if (buildFaction != null && player.getStockPlanetaryInstitute() == 0) {
+            ResourcesVo piIncome = buildFaction.getPiIncome();
+            player.applyIncome(piIncome);
+            log.debug("[{} PI] 수입 적용: {}", buildFaction, piIncome);
         }
         log.debug("건물 수입 적용: 광산 {}개, 교역소 {}개, 연구소 {}개, 행성수도 {}개, 학원 {}개 -> {}",
                 8 - player.getStockMine(),

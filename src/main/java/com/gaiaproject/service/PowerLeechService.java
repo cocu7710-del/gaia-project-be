@@ -32,6 +32,7 @@ public class PowerLeechService {
     private final GameWebSocketService webSocketService;
     private final ActionService actionService;
     private final GamePlayerTechTileRepository playerTechTileRepository;
+    private final com.gaiaproject.repository.map.GameHexRepository hexRepository;
 
     /**
      * 건물 배치/업그레이드 후 파워 리치 배치 처리.
@@ -70,7 +71,14 @@ public class PowerLeechService {
             if (b.getPlayerId().equals(triggerPlayerId)) continue;
             int dist = hexDistance(hexQ, hexR, b.getHexQ(), b.getHexR());
             if (dist > 2) continue;
-            int pv = buildingPowerValue(b.getBuildingType(), gameId, b.getPlayerId());
+            int pv = buildingPowerValue(b.getBuildingType(), gameId, b.getPlayerId()) + (b.isHasRing() ? 2 : 0);
+            // 매안 PI: 본인 행성(TITANIUM)에 있는 건물 파워값 +1
+            var bOwnerState = playerStateRepository.findByGameIdAndPlayerId(gameId, b.getPlayerId()).orElse(null);
+            if (bOwnerState != null && bOwnerState.getFactionType() == com.gaiaproject.domain.enumtype.player.FactionType.BESCODS
+                    && bOwnerState.getStockPlanetaryInstitute() == 0) {
+                var hex = hexRepository.findByGameIdAndHexQAndHexR(gameId, b.getHexQ(), b.getHexR()).orElse(null);
+                if (hex != null && hex.getPlanetType() == com.gaiaproject.domain.enumtype.player.PlanetType.TITANIUM) pv += 1;
+            }
             maxPowerByPlayer.merge(b.getPlayerId(), pv, Math::max);
         }
 

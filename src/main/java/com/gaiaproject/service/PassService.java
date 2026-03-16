@@ -136,6 +136,21 @@ public class PassService {
                 .build();
         passRepository.save(pass);
 
+        // 발타크: 패스 시 사용 가능한 포머 → QIC 자동 변환
+        {
+            GamePlayerState passPs = playerStateRepository.findByGameIdAndPlayerId(gameId, playerId).orElse(null);
+            if (passPs != null && passPs.getFactionType() == com.gaiaproject.domain.enumtype.player.FactionType.BAL_TAKS) {
+                int freeGaiaformers = passPs.getStockGaiaformer();
+                if (freeGaiaformers > 0) {
+                    for (int i = 0; i < freeGaiaformers; i++) {
+                        passPs.convertGaiaformerToQic();
+                    }
+                    playerStateRepository.save(passPs);
+                    log.info("[BAL_TAKS PASS] 포머 {}개 → QIC 자동 변환: player={}", freeGaiaformers, playerId);
+                }
+            }
+        }
+
         log.info("플레이어 패스: gameId={}, playerId={}, round={}, nextBooster={}",
                 gameId, playerId, currentRound, nextRoundBoosterCode);
 
@@ -149,7 +164,7 @@ public class PassService {
             // 라운드 종료
             nextSeatNo = 0;
             boolean itarsWaiting = endRoundAndStartNext(game);
-            webSocketService.broadcastPlayerPassed(gameId, playerId, true);
+            webSocketService.broadcastPlayerPassed(gameId, playerId, currentSeat.getSeatNo(), true);
             if (!itarsWaiting) {
                 webSocketService.broadcastRoundStarted(gameId, game.getCurrentRound());
             }
@@ -158,7 +173,7 @@ public class PassService {
             nextSeatNo = calculateNextTurnSeatNo(game);
             game.nextTurn(nextSeatNo);
             gameRepository.save(game);
-            webSocketService.broadcastPlayerPassed(gameId, playerId, false);
+            webSocketService.broadcastPlayerPassed(gameId, playerId, currentSeat.getSeatNo(), false);
             webSocketService.broadcastTurnChanged(gameId, nextSeatNo);
         }
 
@@ -266,8 +281,31 @@ public class PassService {
         // 2. TRANSDIM → GAIA 헥스 변환
         gaiaformingService.processGaiaPlanetConversion(gameId);
 
-        // 3. 팅커로이드 PI 체크: 액션 타일 선택 기회
+        // 3. 테란 PI 체크: 가이아 구역 파워 → 자원 수동 변환
         List<GamePlayerState> allPlayers = playerStateRepository.findByGameId(gameId);
+        GamePlayerState terransPlayer = allPlayers.stream()
+                .filter(p -> {
+                    var ft = p.getFactionType();
+                    if (ft == null) ft = seatRepository.findByGameIdAndSeatNo(gameId, p.getSeatNo())
+                            .map(s -> s.getFactionType()).orElse(null);
+                    return ft == com.gaiaproject.domain.enumtype.player.FactionType.TERRANS
+                            && p.getStockPlanetaryInstitute() == 0
+                            && p.getGaiaPower() > 0;
+                })
+                .findFirst().orElse(null);
+
+        if (terransPlayer != null) {
+            // 테란 가이아 교환 다이얼로그 브로드캐스트
+            game.setGamePhase("TERRANS_GAIA_PHASE");
+            gameRepository.save(game);
+            webSocketService.broadcast(com.gaiaproject.dto.websocket.GameEvent.of(gameId, "TERRANS_GAIA_CHOICE",
+                    java.util.Map.of("terransPlayerId", terransPlayer.getPlayerId().toString(),
+                            "gaiaPower", terransPlayer.getGaiaPower())));
+            log.info("테란 가이아 변환 대기: game={}, gaia={}", gameId, terransPlayer.getGaiaPower());
+            return true; // 대기
+        }
+
+        // 4. 팅커로이드 PI 체크: 액션 타일 선택 기회
         GamePlayerState tinkeroidsPlayer = allPlayers.stream()
                 .filter(p -> p.getFactionType() == com.gaiaproject.domain.enumtype.player.FactionType.TINKEROIDS
                         && p.getStockPlanetaryInstitute() == 0)
@@ -362,5 +400,30 @@ public class PassService {
         game.setGamePhase("PLAYING");
         gameRepository.save(game);
         webSocketService.broadcastRoundStarted(gameId, game.getCurrentRound());
+    }
+
+    /** 테란 가이아 변환 완료 후 다음 단계 진행 (팅커→아이타→라운드 시작) */
+    public void continueAfterTerransGaia(UUID gameId) {
+        Game game = gameRepository.findById(gameId)
+                .orElseThrow(() -> new IllegalArgumentException("게임을 찾을 수 없습니다"));
+        List<GamePlayerState> allPlayers = playerStateRepository.findByGameId(gameId);
+
+        // 팅커로이드 PI 체크
+        GamePlayerState tinkeroidsPlayer = allPlayers.stream()
+                .filter(p -> p.getFactionType() == com.gaiaproject.domain.enumtype.player.FactionType.TINKEROIDS
+                        && p.getStockPlanetaryInstitute() == 0)
+                .findFirst().orElse(null);
+        if (tinkeroidsPlayer != null) {
+            List<String> available = getTinkeroidsAvailableActions(tinkeroidsPlayer, game.getCurrentRound());
+            if (!available.isEmpty()) {
+                game.setGamePhase("TINKEROIDS_ACTION_PHASE");
+                gameRepository.save(game);
+                webSocketService.broadcastTinkeroidsActionChoice(gameId, tinkeroidsPlayer.getPlayerId(), available, game.getCurrentRound());
+                return;
+            }
+        }
+
+        // 아이타 → 가이아 복귀 → 라운드 시작 (continueTinkeroidsToNextPhase와 동일)
+        continueTinkeroidsToNextPhase(gameId);
     }
 }

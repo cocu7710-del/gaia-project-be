@@ -47,6 +47,12 @@ public class FleetService {
             return PlaceFleetProbeResponse.fail(gameId, playerId, "이미 해당 함대에 탐사선이 배치되어 있습니다");
         }
 
+        // 플레이어당 최대 3개 함대 입장 제한
+        int playerFleetCount = fleetProbeRepository.countByGameIdAndPlayerId(gameId, playerId);
+        if (playerFleetCount >= 3) {
+            return PlaceFleetProbeResponse.fail(gameId, playerId, "최대 3개 함대까지만 입장할 수 있습니다");
+        }
+
         // VP 검증 및 차감
         GamePlayerState playerState = playerStateRepository.findByGameIdAndPlayerId(gameId, playerId)
                 .orElseThrow(() -> new IllegalStateException("플레이어 상태를 찾을 수 없습니다"));

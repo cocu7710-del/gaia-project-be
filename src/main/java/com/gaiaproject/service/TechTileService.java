@@ -52,6 +52,9 @@ public class TechTileService {
     private final GameHexRepository gameHexRepository;
     private final ActionService actionService;
     private final RoundScoringService roundScoringService;
+    private final com.gaiaproject.repository.federation.GameFederationGroupRepository federationGroupRepository;
+    private final com.gaiaproject.repository.player.GamePlayerFederationTokenRepository playerFederationTokenRepository;
+    private final com.gaiaproject.repository.federation.GameFederationOfferRepository federationOfferRepository;
 
     /** 지식 트랙 전진 (지식 4 소모, PLAYING 페이즈) */
     public AdvanceTechResponse advanceTechTrack(UUID gameId, AdvanceTechRequest request) {
@@ -129,6 +132,13 @@ public class TechTileService {
         boolean isAdvanced = tileCode.startsWith("ADV_");
         if (isAdvanced && offer.getTakenByPlayerId() != null)
             throw new IllegalStateException("이미 가져간 고급 기술 타일입니다: " + tileCode);
+
+        // 고급 기술 타일: 사용 가능한 연방 토큰 1개 뒤집기 필요
+        if (isAdvanced) {
+            if (!flipUsableFederationToken(gameId, playerId)) {
+                throw new IllegalStateException("고급 기술 타일 획득에는 사용 가능한 연방 토큰이 필요합니다");
+            }
+        }
 
         // 본인 중복 소유 불가
         if (playerTechTileRepository.existsByGameIdAndPlayerIdAndTechTileCode(gameId, playerId, tileCode))
@@ -430,6 +440,41 @@ public class TechTileService {
      * - 지식:     1~4→지식수입(라운드 수입 단계 처리, 즉각 보상 없음)
      */
     public void applyTechTrackReward(GamePlayerState ps, String trackCode, int newLevel, EconomyTrackOption economyOption) {
+        // 5트랙 진입: 사용 가능한 연방 토큰 1개 뒤집기 필요
+        if (newLevel == 5) {
+            if (!flipUsableFederationToken(ps.getGameId(), ps.getPlayerId())) {
+                throw new IllegalStateException("5단계 진입에는 사용 가능한 연방 토큰이 필요합니다");
+            }
+            // 테라포밍 5단계: 해당 칸의 연방 타일 획득
+            if ("TERRA_FORMING".equals(trackCode)) {
+                var offerOpt = federationOfferRepository.findByGameIdAndPosition(ps.getGameId(), 0);
+                if (offerOpt.isPresent()) {
+                    var offer = offerOpt.get();
+                    if (offer.getQuantity() > 0) {
+                        offer.decreaseQuantity();
+                        federationOfferRepository.save(offer);
+                        // 플레이어 연방 토큰 기록
+                        playerFederationTokenRepository.save(
+                                com.gaiaproject.domain.entity.player.GamePlayerFederationToken.builder()
+                                        .gameId(ps.getGameId()).playerId(ps.getPlayerId())
+                                        .federationTileType(offer.getFederationTileType()).build());
+                        // 즉시 보상 적용
+                        ps.applyIncome(offer.getFederationTileType().getImmediateReward());
+                        log.info("[TECH_LV5_TERRA] 연방 타일 획득: player={}, tile={}", ps.getPlayerId(), offer.getFederationTileType());
+                    }
+                }
+            }
+            // 라운드 점수: 연방 토큰 획득 (테라포밍 5단계)
+            if ("TERRA_FORMING".equals(trackCode)) {
+                var game = gameRepository.findById(ps.getGameId()).orElse(null);
+                if (game != null && game.getCurrentRound() != null) {
+                    roundScoringService.award(ps.getGameId(), game.getCurrentRound(), ps,
+                            com.gaiaproject.domain.enumtype.rounds.RoundScoringEvent.FEDERATION_FORMED, 1);
+                }
+            }
+            log.info("[TECH_LV5] 연방 토큰 뒤집기 완료: player={}, track={}", ps.getPlayerId(), trackCode);
+            return;
+        }
         if (newLevel < 1 || newLevel > 4) return;
 
         // 모든 트랙 공통: 2→3 전진 시 3파워 순환
@@ -483,5 +528,61 @@ public class TechTileService {
         }
 
         log.info("[TECH_REWARD] player={}, track={}, level={}", ps.getPlayerId(), trackCode, newLevel);
+    }
+
+    /**
+     * 사용 가능한 연방 토큰 1개 뒤집기 (고급 기술타일 획득 / 5트랙 진입 시 필요)
+     * 연방 그룹 토큰 또는 직접 보유 토큰 중 useFederation=true이고 아직 사용 안 한 것을 뒤집음.
+     * @return true if flipped, false if no usable token
+     */
+    public boolean flipUsableFederationToken(UUID gameId, UUID playerId) {
+        // 1. 연방 그룹에서 사용 가능한 토큰 찾기
+        var groups = federationGroupRepository.findByGameIdAndPlayerId(gameId, playerId);
+        for (var g : groups) {
+            if (!g.isUsed()) {
+                try {
+                    var tileType = com.gaiaproject.domain.enumtype.federation.FederationTileType.valueOf(g.getFederationTileCode());
+                    if (tileType.isUseFederation()) {
+                        g.markUsed();
+                        federationGroupRepository.save(g);
+                        log.info("[FED_FLIP] 연방 그룹 토큰 뒤집기: player={}, tile={}", playerId, g.getFederationTileCode());
+                        return true;
+                    }
+                } catch (IllegalArgumentException ignored) {}
+            }
+        }
+
+        // 2. 직접 보유 토큰에서 사용 가능한 것 찾기 (글린 PI 등)
+        var tokens = playerFederationTokenRepository.findByGameIdAndPlayerId(gameId, playerId);
+        for (var t : tokens) {
+            if (!t.isUsed() && t.getFederationTileType().isUseFederation()) {
+                t.markUsed();
+                playerFederationTokenRepository.save(t);
+                log.info("[FED_FLIP] 직접 보유 토큰 뒤집기: player={}, tile={}", playerId, t.getFederationTileType());
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * 플레이어가 사용 가능한(뒤집을 수 있는) 연방 토큰을 보유하고 있는지 확인
+     */
+    public boolean hasUsableFederationToken(UUID gameId, UUID playerId) {
+        var groups = federationGroupRepository.findByGameIdAndPlayerId(gameId, playerId);
+        for (var g : groups) {
+            if (!g.isUsed()) {
+                try {
+                    var tileType = com.gaiaproject.domain.enumtype.federation.FederationTileType.valueOf(g.getFederationTileCode());
+                    if (tileType.isUseFederation()) return true;
+                } catch (IllegalArgumentException ignored) {}
+            }
+        }
+        var tokens = playerFederationTokenRepository.findByGameIdAndPlayerId(gameId, playerId);
+        for (var t : tokens) {
+            if (!t.isUsed() && t.getFederationTileType().isUseFederation()) return true;
+        }
+        return false;
     }
 }

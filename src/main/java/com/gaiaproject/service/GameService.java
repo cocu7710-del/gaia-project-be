@@ -90,6 +90,9 @@ public class GameService {
     /** WebSocket 브로드캐스트 서비스 **/
     private final GameWebSocketService webSocketService;
 
+    /** 함대 탐사선 저장소 **/
+    private final com.gaiaproject.repository.player.GamePlayerFleetProbeRepository fleetProbeRepository;
+
     /** 광산 배치 순서 계산 서비스 */
     private final MineSetupOrderService mineSetupOrderService;
 
@@ -581,6 +584,14 @@ public class GameService {
 
         // 5-1) 팅커로이드/모웨이드 추가 3삽 행성 랜덤 할당
         assignExtraRingPlanetsIfNeeded(game, seats);
+
+        // 5-2) 모웨이드: TF_MARS 함대 우주선 자동 입장 (VP 제거 없음)
+        for (GameSeat seat : seats) {
+            if (seat.getFactionType() == com.gaiaproject.domain.enumtype.player.FactionType.MOWEIDS && seat.getPlayerId() != null) {
+                fleetProbeRepository.save(com.gaiaproject.domain.entity.player.GamePlayerFleetProbe.builder()
+                        .gameId(game.getId()).playerId(seat.getPlayerId()).fleetName("TF_MARS").build());
+            }
+        }
 
         gameRepository.save(game);
 

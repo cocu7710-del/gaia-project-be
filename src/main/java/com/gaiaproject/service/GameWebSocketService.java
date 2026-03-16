@@ -99,9 +99,9 @@ public class GameWebSocketService {
     /**
      * 플레이어 패스 이벤트
      */
-    public void broadcastPlayerPassed(UUID roomId, UUID playerId, boolean allPassed) {
+    public void broadcastPlayerPassed(UUID roomId, UUID playerId, int seatNo, boolean allPassed) {
         broadcast(GameEvent.of(roomId, "PLAYER_PASSED",
-                java.util.Map.of("playerId", playerId.toString(), "allPassed", allPassed)));
+                java.util.Map.of("playerId", playerId.toString(), "seatNo", seatNo, "allPassed", allPassed)));
     }
 
     /**

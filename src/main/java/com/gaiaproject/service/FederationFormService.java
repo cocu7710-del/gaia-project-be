@@ -45,6 +45,8 @@ public class FederationFormService {
     private final GamePlayerFederationTokenRepository playerFederationTokenRepository;
     private final ActionService actionService;
     private final GamePlayerTechTileRepository playerTechTileRepository;
+    private final RoundScoringService roundScoringService;
+    private final com.gaiaproject.repository.map.GameHexRepository hexRepository;
 
     /**
      * 건물 선택 검증 (토큰 배치 전). 파워 합계 + 기존 연방 중복 체크 + 최소 토큰 수 반환.
@@ -71,7 +73,7 @@ public class FederationFormService {
             String key = hex[0] + "," + hex[1];
             GameBuilding b = myBuildingMap.get(key);
             if (b == null) return Map.of("success", false, "message", "내 건물이 아닙니다: (" + hex[0] + "," + hex[1] + ")");
-            totalPower += buildingPowerValue(b.getBuildingType(), gameId, playerId);
+            totalPower += buildingPowerValue(b.getBuildingType(), gameId, playerId, b.isHasRing());
         }
 
         // 기존 연방 중복 체크 (하이브 제외)
@@ -232,7 +234,7 @@ public class FederationFormService {
         }
 
         // 파워 값 (BASIC_TILE_9 반영)
-        int totalPowerValue = selectedBuildings.stream().mapToInt(b -> buildingPowerValue(b.getBuildingType(), gameId, playerId)).sum();
+        int totalPowerValue = selectedBuildings.stream().mapToInt(b -> buildingPowerValue(b.getBuildingType(), gameId, playerId, b.isHasRing())).sum();
 
         // 제노스 PI: 연방 필요 파워 6
         boolean isXenosPi = ps.getFactionType() == FactionType.XENOS && ps.getStockPlanetaryInstitute() == 0;
@@ -246,7 +248,7 @@ public class FederationFormService {
                 GameFederationGroup eg = existingGroups.get(0);
                 for (GameFederationBuilding fb : federationBuildingRepository.findByFederationGroupId(eg.getId())) {
                     GameBuilding b = buildingRepository.findFirstByGameIdAndHexQAndHexRAndIsLantidsMine(gameId, fb.getHexQ(), fb.getHexR(), false).orElse(null);
-                    if (b != null) existingPowerValue += buildingPowerValue(b.getBuildingType(), gameId, playerId);
+                    if (b != null) existingPowerValue += buildingPowerValue(b.getBuildingType(), gameId, playerId, b.isHasRing());
                 }
             }
             int total = existingPowerValue + totalPowerValue;
@@ -344,7 +346,16 @@ public class FederationFormService {
         }
 
         // 5. 파워 값 합계 검증 (제노스 PI: 6 이상, 기본: 7 이상)
-        int totalPowerValue = selectedBuildings.stream().mapToInt(b -> buildingPowerValue(b.getBuildingType(), gameId, playerId)).sum();
+        int totalPowerValue = selectedBuildings.stream().mapToInt(b -> buildingPowerValue(b.getBuildingType(), gameId, playerId, b.isHasRing())).sum();
+        // 매안 PI: 본인 행성(TITANIUM) 건물 파워값 +1
+        if (ps.getFactionType() == FactionType.BESCODS && ps.getStockPlanetaryInstitute() == 0) {
+            for (GameBuilding b : selectedBuildings) {
+                var hexOpt = hexRepository.findByGameIdAndHexQAndHexR(gameId, b.getHexQ(), b.getHexR());
+                if (hexOpt.isPresent() && hexOpt.get().getPlanetType() == com.gaiaproject.domain.enumtype.player.PlanetType.TITANIUM) {
+                    totalPowerValue += 1;
+                }
+            }
+        }
         boolean isXenosPiHere = ps.getFactionType() == FactionType.XENOS && ps.getStockPlanetaryInstitute() == 0;
         int fedReq = isXenosPiHere ? 6 : 7;
         if (totalPowerValue < fedReq) {
@@ -373,6 +384,11 @@ public class FederationFormService {
         playerFederationTokenRepository.save(GamePlayerFederationToken.builder().gameId(gameId).playerId(playerId).federationTileType(tileType).build());
 
         ps.applyIncome(tileType.getImmediateReward());
+        // 라운드 점수: 연방 형성
+        if (game.getCurrentRound() != null) {
+            roundScoringService.award(gameId, game.getCurrentRound(), ps,
+                    com.gaiaproject.domain.enumtype.rounds.RoundScoringEvent.FEDERATION_FORMED, 1);
+        }
         playerStateRepository.save(ps);
 
         log.info("[FEDERATION] 일반 연방: game={}, player={}, tile={}, buildings={}, tokens={}", gameId, playerId, tileType, buildingHexes.size(), tokenCount);
@@ -415,7 +431,7 @@ public class FederationFormService {
         }
 
         // 신규 건물 파워값
-        int newPowerValue = selectedBuildings.stream().mapToInt(b -> buildingPowerValue(b.getBuildingType(), gameId, playerId)).sum();
+        int newPowerValue = selectedBuildings.stream().mapToInt(b -> buildingPowerValue(b.getBuildingType(), gameId, playerId, b.isHasRing())).sum();
 
         // 기존 연방 파워 합산
         int existingPowerValue = 0;
@@ -423,7 +439,7 @@ public class FederationFormService {
             List<GameFederationBuilding> existingFedBuildings = federationBuildingRepository.findByFederationGroupId(existingGroup.getId());
             for (GameFederationBuilding fb : existingFedBuildings) {
                 GameBuilding b = buildingRepository.findFirstByGameIdAndHexQAndHexRAndIsLantidsMine(gameId, fb.getHexQ(), fb.getHexR(), false).orElse(null);
-                if (b != null) existingPowerValue += buildingPowerValue(b.getBuildingType(), gameId, playerId);
+                if (b != null) existingPowerValue += buildingPowerValue(b.getBuildingType(), gameId, playerId, b.isHasRing());
             }
         }
 
@@ -470,6 +486,11 @@ public class FederationFormService {
         playerFederationTokenRepository.save(GamePlayerFederationToken.builder().gameId(gameId).playerId(playerId).federationTileType(tileType).build());
 
         ps.applyIncome(tileType.getImmediateReward());
+        // 라운드 점수: 연방 형성
+        if (game.getCurrentRound() != null) {
+            roundScoringService.award(gameId, game.getCurrentRound(), ps,
+                    com.gaiaproject.domain.enumtype.rounds.RoundScoringEvent.FEDERATION_FORMED, 1);
+        }
         playerStateRepository.save(ps);
 
         log.info("[FEDERATION-IVITS] 연방: game={}, player={}, tile={}, newBuildings={}, qicTokens={}, totalPower={}",
@@ -549,8 +570,12 @@ public class FederationFormService {
         };
     }
 
-    /** BASIC_TILE_9 보유 시 큰 건물 파워 가치 +1 반영 */
+    /** BASIC_TILE_9 보유 시 큰 건물 파워 가치 +1, 모웨이드 링 +2 반영 */
     private int buildingPowerValue(BuildingType type, UUID gameId, UUID playerId) {
+        return buildingPowerValue(type, gameId, playerId, false);
+    }
+
+    private int buildingPowerValue(BuildingType type, UUID gameId, UUID playerId, boolean hasRing) {
         int base = buildingPowerValue(type);
         if ((type == BuildingType.PLANETARY_INSTITUTE || type == BuildingType.ACADEMY)
                 && playerTechTileRepository
@@ -559,21 +584,37 @@ public class FederationFormService {
                     .anyMatch(t -> "BASIC_TILE_9".equals(t.getTechTileCode()))) {
             base += 1;
         }
+        if (hasRing) base += 2;
         return base;
     }
 
-    /** 게임의 모든 연방 데이터 조회 (FE 표시용) */
+    /** 게임의 모든 연방 데이터 조회 (FE 표시용) — 연방 그룹 + 플레이어 직접 보유 토큰(글린 PI 등) */
     public List<FederationGroupInfo> getFederationGroups(UUID gameId) {
-        List<GameFederationGroup> groups = federationGroupRepository.findByGameId(gameId);
-        if (groups.isEmpty()) return List.of();
+        List<FederationGroupInfo> result = new java.util.ArrayList<>();
 
-        return groups.stream().map(g -> {
+        // 1. 연방 그룹 기반 토큰
+        List<GameFederationGroup> groups = federationGroupRepository.findByGameId(gameId);
+        for (var g : groups) {
             List<int[]> bHexes = federationBuildingRepository.findByFederationGroupId(g.getId())
                     .stream().map(b -> new int[]{b.getHexQ(), b.getHexR()}).toList();
             List<int[]> tHexes = federationTokenHexRepository.findByFederationGroupId(g.getId())
                     .stream().map(t -> new int[]{t.getHexQ(), t.getHexR()}).toList();
-            return new FederationGroupInfo(g.getPlayerId().toString(), g.getFederationTileCode(), bHexes, tHexes);
-        }).toList();
+            result.add(new FederationGroupInfo(g.getPlayerId().toString(), g.getFederationTileCode(), bHexes, tHexes, g.isUsed()));
+        }
+
+        // 2. 플레이어 직접 보유 토큰 (글린 PI 등 — 연방 그룹에 속하지 않는 토큰)
+        var allPlayerTokens = playerFederationTokenRepository.findByGameId(gameId);
+        for (var token : allPlayerTokens) {
+            String tileCode = token.getFederationTileType().name();
+            boolean alreadyInGroup = result.stream().anyMatch(
+                    r -> r.playerId().equals(token.getPlayerId().toString()) && r.tileCode().equals(tileCode)
+            );
+            if (!alreadyInGroup) {
+                result.add(new FederationGroupInfo(token.getPlayerId().toString(), tileCode, List.of(), List.of(), token.isUsed()));
+            }
+        }
+
+        return result;
     }
 
     /**
@@ -667,5 +708,5 @@ public class FederationFormService {
                 .toList();
     }
 
-    public record FederationGroupInfo(String playerId, String tileCode, List<int[]> buildingHexes, List<int[]> tokenHexes) {}
+    public record FederationGroupInfo(String playerId, String tileCode, List<int[]> buildingHexes, List<int[]> tokenHexes, boolean used) {}
 }

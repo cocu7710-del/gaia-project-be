@@ -32,8 +32,15 @@ public class FreeConvertService {
     }
 
     public FreeConvertResponse convert(UUID gameId, UUID playerId, String convertCode) {
+        return convert(gameId, playerId, convertCode, false);
+    }
+
+    public FreeConvertResponse convert(UUID gameId, UUID playerId, String convertCode, boolean useBrainstone) {
         GamePlayerState ps = playerStateRepository.findByGameIdAndPlayerId(gameId, playerId)
                 .orElseThrow(() -> new IllegalArgumentException("플레이어 상태 없음: " + playerId));
+
+        // 타클론 브레인스톤 플래그 설정
+        if (useBrainstone) ps.setUseBrainstone(true);
 
         try {
             switch (convertCode) {
@@ -53,17 +60,24 @@ public class FreeConvertService {
                     log.info("[FREE] 광석→3구역파워(XENOS): player={}", playerId);
                 }
                 case "POWER_TO_CREDIT" -> {
-                    ps.spendPower(1);
-                    ps.addCredit(1);
-                    log.info("[FREE] 파워1→크레딧: player={}", playerId);
+                    if (useBrainstone) {
+                        // 브레인스톤(3파워) → 3크레딧
+                        ps.spendPower(3); // useBrainstone=true이므로 브레인스톤 이동
+                        ps.addCredit(3);
+                        log.info("[FREE] 브레인스톤→3크레딧: player={}", playerId);
+                    } else {
+                        ps.spendPower(1);
+                        ps.addCredit(1);
+                        log.info("[FREE] 파워1→크레딧: player={}", playerId);
+                    }
                 }
                 case "POWER_TO_ORE" -> {
-                    ps.spendPower(3);
+                    ps.spendPower(3); // 브레인스톤이면 브레인스톤만, 일반이면 3토큰
                     ps.addOre(1);
                     log.info("[FREE] 파워3→광석: player={}", playerId);
                 }
                 case "POWER_TO_KNOWLEDGE" -> {
-                    ps.spendPower(4);
+                    ps.spendPower(4); // 브레인스톤(3)+일반(1) or 일반(4)
                     ps.addKnowledge(1);
                     log.info("[FREE] 파워4→지식: player={}", playerId);
                 }
@@ -101,6 +115,22 @@ public class FreeConvertService {
                     ps.spendCredit(4);
                     ps.addQic(1);
                     log.info("[FREE] 하쉬할라 4c→QIC: player={}", playerId);
+                }
+                // 네블라 PI: 3구역 파워 1개 = 2파워 (2개 소모 = 4파워)
+                case "NEVLAS_4P_ORE_CREDIT" -> {
+                    // 4파워 = 3구역 2개 소모 → 1광석 + 1크레딧
+                    if (ps.getPowerBowl3() < 2) throw new IllegalStateException("3구역 파워 2개 필요");
+                    ps.spendPower(2); // bowl3에서 2개 → bowl1로
+                    ps.addOre(1);
+                    ps.addCredit(1);
+                    log.info("[FREE] 네블라 PI 4파워→1광석+1크레딧: player={}", playerId);
+                }
+                case "NEVLAS_4P_ORE2" -> {
+                    // 4파워 = 3구역 2개 소모 → 2광석
+                    if (ps.getPowerBowl3() < 2) throw new IllegalStateException("3구역 파워 2개 필요");
+                    ps.spendPower(2); // bowl3에서 2개 → bowl1로
+                    ps.addOre(2);
+                    log.info("[FREE] 네블라 PI 4파워→2광석: player={}", playerId);
                 }
                 default -> { return FreeConvertResponse.fail("알 수 없는 변환 코드: " + convertCode); }
             }

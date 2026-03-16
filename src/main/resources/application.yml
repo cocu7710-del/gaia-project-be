@@ -10,7 +10,7 @@ spring:
 
   jpa:
     hibernate:
-      ddl-auto: validate     # Flyway ?? validate ??
+      ddl-auto: none         # Flyway로 스키마 관리, Hibernate 검증 비활성화
     properties:
       hibernate:
         format_sql: true

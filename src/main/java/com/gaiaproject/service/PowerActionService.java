@@ -146,6 +146,10 @@ public class PowerActionService {
         PowerActionEffect effect = getEffect(request.powerActionCode());
         if (effect != null) {
             // 기본 파워 액션: 즉시 자원 처리
+            // 타클론: FE에서 useBrainstone 플래그 전달
+            if (request.useBrainstone() != null && request.useBrainstone()) {
+                playerState.setUseBrainstone(true);
+            }
             try {
                 playerState.spendPower(effect.powerCost());
                 if (effect.creditsGain() > 0) playerState.addCredit(effect.creditsGain());

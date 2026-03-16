@@ -161,13 +161,15 @@ public class GamePlayerState {
         this.knowledge = Math.min(15, this.knowledge + amount);
     }
 
+    /** 글린 전용 플래그: QIC 아카데미 건설 여부 (true면 QIC 정상 획득) */
+    @Transient
+    private boolean gleensHasQicAcademy = false;
+    public void setGleensHasQicAcademy(boolean v) { this.gleensHasQicAcademy = v; }
+
     public void addQic(int amount) {
-        if (factionType == com.gaiaproject.domain.enumtype.player.FactionType.GLEENS) {
-            if (stockAcademy < 2) {
-                // 아카데미 건설 후: QIC → 광석 자동 변환
-                this.ore = Math.min(15, this.ore + amount);
-            }
-            // 아카데미 건설 전: QIC 획득 불가 (버림)
+        if (factionType == com.gaiaproject.domain.enumtype.player.FactionType.GLEENS && !gleensHasQicAcademy) {
+            // QIC 아카데미 건설 전: QIC → 광석 자동 변환
+            this.ore = Math.min(15, this.ore + amount);
             return;
         }
         this.qic += amount;
@@ -432,9 +434,13 @@ public class GamePlayerState {
         this.updatedAt = LocalDateTime.now();
     }
 
-    /** 라운드 시작 시 가이아 구역 파워 전부 bowl1으로 복귀 */
+    /** 라운드 시작 시 가이아 구역 파워 복귀 (테란: bowl2, 나머지: bowl1) */
     public void returnGaiaPower() {
-        this.powerBowl1 += this.gaiaPower;
+        if (factionType == com.gaiaproject.domain.enumtype.player.FactionType.TERRANS) {
+            this.powerBowl2 += this.gaiaPower;
+        } else {
+            this.powerBowl1 += this.gaiaPower;
+        }
         this.gaiaPower = 0;
         this.updatedAt = LocalDateTime.now();
     }
@@ -658,11 +664,46 @@ public class GamePlayerState {
         this.updatedAt = LocalDateTime.now();
     }
 
+    /** useBrainstone: 타클론 전용 — true면 브레인스톤(3파워)을 먼저 사용 */
+    @Transient
+    private boolean useBrainstone = false;
+    public void setUseBrainstone(boolean v) { this.useBrainstone = v; }
+
     public void spendPower(int amount) {
-        if (this.powerBowl3 < amount) throw new IllegalStateException("파워가 부족합니다. 필요: " + amount + ", 보유: " + this.powerBowl3);
-        this.powerBowl3 -= amount;
-        // 소비된 파워는 bowl 1로 이동
-        this.powerBowl1 += amount;
+        // 네블라 PI: bowl3 토큰 1개 = 2파워 (남는 파워 반환 없음)
+        boolean isNevlasPi = factionType == com.gaiaproject.domain.enumtype.player.FactionType.NEVLAS
+                && stockPlanetaryInstitute == 0;
+
+        // 타클론: 브레인스톤 사용 (bowl3에 있을 때, 3파워 가치, 남는 파워 반환 없음)
+        if (useBrainstone && brainstoneBowl != null && brainstoneBowl == 3) {
+            int brainstonePower = 3;
+            if (amount <= brainstonePower) {
+                // 브레인스톤만으로 충분 → 브레인스톤만 이동 (bowl3→bowl1)
+                brainstoneBowl = 1;
+                this.updatedAt = LocalDateTime.now();
+                return;
+            } else {
+                // 브레인스톤 + 추가 파워
+                brainstoneBowl = 1;
+                int remaining = amount - brainstonePower;
+                if (this.powerBowl3 < remaining) throw new IllegalStateException("파워가 부족합니다");
+                this.powerBowl3 -= remaining;
+                this.powerBowl1 += remaining;
+                this.updatedAt = LocalDateTime.now();
+                return;
+            }
+        }
+
+        if (isNevlasPi) {
+            int tokensNeeded = (amount + 1) / 2;
+            if (this.powerBowl3 < tokensNeeded) throw new IllegalStateException("파워가 부족합니다. 필요 토큰: " + tokensNeeded + ", 보유: " + this.powerBowl3);
+            this.powerBowl3 -= tokensNeeded;
+            this.powerBowl1 += tokensNeeded;
+        } else {
+            if (this.powerBowl3 < amount) throw new IllegalStateException("파워가 부족합니다. 필요: " + amount + ", 보유: " + this.powerBowl3);
+            this.powerBowl3 -= amount;
+            this.powerBowl1 += amount;
+        }
         this.updatedAt = LocalDateTime.now();
     }
 

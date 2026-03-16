@@ -48,6 +48,12 @@ public class GameBuilding {
     @com.fasterxml.jackson.annotation.JsonProperty("isLantidsMine")
     private boolean isLantidsMine = false;
 
+    // 모웨이드 전용: 링 씌운 건물 (파워값 +2)
+    @Column(name = "has_ring", nullable = false)
+    private boolean hasRing = false;
+
+    public void applyRing() { this.hasRing = true; }
+
     /**
      * 건물 배치 생성
      */

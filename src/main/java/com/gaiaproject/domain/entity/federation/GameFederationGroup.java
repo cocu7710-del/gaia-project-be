@@ -28,11 +28,18 @@ public class GameFederationGroup {
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt;
 
+    @Column(name = "used", nullable = false)
+    private boolean used = false;
+
     @Builder
     public GameFederationGroup(UUID gameId, UUID playerId, String federationTileCode) {
         this.gameId = gameId;
         this.playerId = playerId;
         this.federationTileCode = federationTileCode;
         this.createdAt = LocalDateTime.now();
+        this.used = false;
     }
+
+    /** 사용 가능한 토큰 뒤집기 */
+    public void markUsed() { this.used = true; }
 }

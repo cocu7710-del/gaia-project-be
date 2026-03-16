@@ -33,11 +33,18 @@ public class GamePlayerFederationToken {
     @Column(name = "acquired_at", nullable = false)
     private LocalDateTime acquiredAt;
 
+    @Column(name = "used", nullable = false)
+    private boolean used = false;
+
     @Builder
     public GamePlayerFederationToken(UUID gameId, UUID playerId, FederationTileType federationTileType) {
         this.gameId = gameId;
         this.playerId = playerId;
         this.federationTileType = federationTileType;
         this.acquiredAt = LocalDateTime.now();
+        this.used = false;
     }
+
+    /** 사용 가능한 토큰 뒤집기 */
+    public void markUsed() { this.used = true; }
 }

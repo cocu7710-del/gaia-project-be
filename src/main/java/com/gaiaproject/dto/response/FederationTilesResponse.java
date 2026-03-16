@@ -28,6 +28,7 @@ public record FederationTilesResponse(
             String artifactCode,
             String description,
             int position,
-            boolean isTaken
+            boolean isTaken,
+            String acquiredByPlayerId
     ) {}
 }

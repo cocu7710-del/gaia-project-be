@@ -47,6 +47,7 @@ public class BuildingService {
     private final GamePlayerTechTileRepository playerTechTileRepository;
     private final RoundScoringService roundScoringService;
     private final PowerLeechService powerLeechService;
+    private final com.gaiaproject.repository.player.GamePlayerFederationTokenRepository federationTokenRepository;
     private final FederationFormService federationFormService;
 
     /**
@@ -321,6 +322,25 @@ public class BuildingService {
             case ACADEMY -> roundScoringService.award(gameId, upgradeRound, playerState, RoundScoringEvent.ACADEMY_BUILT, 1);
             default -> {}
         }
+
+        // 글린 PI 건설 시 글린 전용 연방 토큰 즉시 지급 (즉시 효과: 2c+1o+1k)
+        if (targetType == BuildingType.PLANETARY_INSTITUTE
+                && playerState.getFactionType() == FactionType.GLEENS) {
+            var gleensFedToken = com.gaiaproject.domain.entity.player.GamePlayerFederationToken.builder()
+                    .gameId(gameId)
+                    .playerId(request.playerId())
+                    .federationTileType(com.gaiaproject.domain.enumtype.federation.FederationTileType.GLEENS_FEDERATION)
+                    .build();
+            federationTokenRepository.save(gleensFedToken);
+            playerState.addCredit(2);
+            playerState.addOre(1);
+            playerState.addKnowledge(1);
+            // 라운드 점수: 연방 토큰 획득
+            roundScoringService.award(gameId, upgradeRound, playerState,
+                    com.gaiaproject.domain.enumtype.rounds.RoundScoringEvent.FEDERATION_FORMED, 1);
+            log.info("[GLEENS PI] 전용 연방 토큰 지급 + 즉시 보상 2c 1o 1k + 라운드점수: player={}", request.playerId());
+        }
+
         gamePlayerStateRepository.save(playerState);
 
         // 연구소/아카데미/스페이스자이언트 의회 건설 시 기술 타일 획득 (선택)

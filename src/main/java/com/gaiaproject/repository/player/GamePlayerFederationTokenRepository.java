@@ -11,6 +11,8 @@ import java.util.UUID;
 @Repository
 public interface GamePlayerFederationTokenRepository extends JpaRepository<GamePlayerFederationToken, UUID> {
 
+    List<GamePlayerFederationToken> findByGameId(UUID gameId);
+
     List<GamePlayerFederationToken> findByGameIdAndPlayerId(UUID gameId, UUID playerId);
 
     int countByGameIdAndPlayerId(UUID gameId, UUID playerId);

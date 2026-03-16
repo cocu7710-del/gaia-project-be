@@ -113,7 +113,7 @@ public class BuildingIncomeVo {
         total = total.add(getMineIncome(stockMine));
         total = total.add(getTradingStationIncome(stockTradingStation));
         total = total.add(getResearchLabIncome(stockResearchLab));
-        total = total.add(getPlanetaryInstituteIncome(stockPlanetaryInstitute));
+        // PI 수입은 종족별로 다르므로 IncomeService에서 FactionType.getPiIncome()으로 처리
         total = total.add(getAcademyIncome(knowledgeAcademyCount, isItars));
         return total;
     }

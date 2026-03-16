@@ -96,6 +96,7 @@ public class FactionAbilityService {
                 // ITARS_GAIA_TO_TECH_TILE: 라운드 종료 시 자동 처리 (handleItarsRoundEndChoice)
                 case "IVITS_PLACE_STATION"          -> handleIvitsPlaceStation(gameId, playerId, ps, code, request);
                 case "QIC_ACADEMY_ACTION"           -> handleQicAcademyAction(gameId, playerId, ps, code);
+                case "MOWEIDS_RING"                 -> handleMoweidsRing(gameId, playerId, ps, code, request);
                 default -> FactionAbilityResponse.fail(gameId, code, "알 수 없는 능력 코드: " + code);
             };
         } catch (IllegalStateException e) {
@@ -286,7 +287,7 @@ public class FactionAbilityService {
 
     /**
      * 하드쉬 할라 PI: 크레딧으로 자원 변환 (프리 액션)
-     * trackCode: ORE(4c→1o), KNOWLEDGE(2c→1k), QIC(3c→1qic)
+     * trackCode: ORE(3c→1o), KNOWLEDGE(4c→1k), QIC(4c→1qic)
      */
     private FactionAbilityResponse handleHadschHallasCreditConvert(UUID gameId, UUID playerId, GamePlayerState ps, String code, FactionAbilityRequest req) {
         if (ps.getFactionType() != FactionType.HADSCH_HALLAS) return FactionAbilityResponse.fail(gameId, code, "하드쉬 할라만 사용 가능");
@@ -295,19 +296,19 @@ public class FactionAbilityService {
         String target = req.trackCode(); // ORE / KNOWLEDGE / QIC
         switch (target == null ? "" : target) {
             case "ORE" -> {
-                ps.spendCredit(4);
+                ps.spendCredit(3);
                 ps.addOre(1);
-                log.info("[HADSCH_HALLAS PI] 4크레딧→1광석: player={}", playerId);
+                log.info("[HADSCH_HALLAS PI] 3크레딧→1광석: player={}", playerId);
             }
             case "KNOWLEDGE" -> {
-                ps.spendCredit(2);
+                ps.spendCredit(4);
                 ps.addKnowledge(1);
-                log.info("[HADSCH_HALLAS PI] 2크레딧→1지식: player={}", playerId);
+                log.info("[HADSCH_HALLAS PI] 4크레딧→1지식: player={}", playerId);
             }
             case "QIC" -> {
-                ps.spendCredit(3);
+                ps.spendCredit(4);
                 ps.addQic(1);
-                log.info("[HADSCH_HALLAS PI] 3크레딧→1QIC: player={}", playerId);
+                log.info("[HADSCH_HALLAS PI] 4크레딧→1QIC: player={}", playerId);
             }
             default -> { return FactionAbilityResponse.fail(gameId, code, "trackCode: ORE/KNOWLEDGE/QIC 중 하나를 지정하세요"); }
         }
@@ -552,5 +553,35 @@ public class FactionAbilityService {
     /** 건물 좌표 교환 (reflection 없이 직접 setter가 없으므로 GameBuilding에 swapPosition 추가 필요) */
     private void swapBuildingPosition(GameBuilding building, int newQ, int newR) {
         building.setPosition(newQ, newR);
+    }
+
+    /**
+     * 모웨이드 PI: 본인 건물에 링 씌우기 (라운드당 1회, 파워값 +2)
+     * request.hexQ/hexR = 링 씌울 건물 위치
+     */
+    private FactionAbilityResponse handleMoweidsRing(UUID gameId, UUID playerId, GamePlayerState ps, String code, FactionAbilityRequest req) {
+        if (ps.getFactionType() != FactionType.MOWEIDS) return FactionAbilityResponse.fail(gameId, code, "모웨이드만 사용 가능");
+        if (!hasPi(ps)) return FactionAbilityResponse.fail(gameId, code, "행성 의회 건설 후 사용 가능합니다");
+        if (ps.isFactionAbilityUsed()) return FactionAbilityResponse.fail(gameId, code, "이번 라운드 이미 사용했습니다");
+        if (req.hexQ() == null || req.hexR() == null) return FactionAbilityResponse.fail(gameId, code, "건물 위치를 지정해야 합니다");
+
+        Optional<GameBuilding> bOpt = buildingRepository.findFirstByGameIdAndHexQAndHexRAndIsLantidsMine(gameId, req.hexQ(), req.hexR(), false);
+        if (bOpt.isEmpty() || !bOpt.get().getPlayerId().equals(playerId))
+            return FactionAbilityResponse.fail(gameId, code, "해당 위치에 본인 건물이 없습니다");
+
+        GameBuilding building = bOpt.get();
+        if (building.isHasRing())
+            return FactionAbilityResponse.fail(gameId, code, "이미 링이 씌워진 건물입니다");
+
+        building.applyRing();
+        buildingRepository.save(building);
+
+        ps.markFactionAbilityUsed();
+        playerStateRepository.save(ps);
+        log.info("[MOWEIDS PI] 링 씌우기: player={}, hex=({},{}), building={}", playerId, req.hexQ(), req.hexR(), building.getBuildingType());
+
+        var result = actionService.saveActionAndNextTurn(gameId, playerId, ActionType.FACTION_ABILITY,
+                "{\"abilityCode\":\"" + code + "\",\"hexQ\":" + req.hexQ() + ",\"hexR\":" + req.hexR() + "}");
+        return FactionAbilityResponse.success(gameId, code, result.nextTurnSeatNo());
     }
 }

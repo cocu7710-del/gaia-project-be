@@ -53,6 +53,7 @@ public class ActionController {
     private final FactionAbilityService factionAbilityService;
     private final GaiaformingService gaiaformingService;
     private final FreeConvertService freeConvertService;
+    private final com.gaiaproject.service.IncomeService incomeService;
 
     @Operation(summary = "액션 저장 및 턴 넘김 (범용)")
     @PostMapping("/save")
@@ -176,11 +177,12 @@ public class ActionController {
             @PathVariable UUID roomId,
             @RequestBody FreeConvertRequest request
     ) {
-        log.info("프리 변환: roomId={}, playerId={}, code={}", roomId, request.playerId(), request.convertCode());
-        return ResponseEntity.ok(freeConvertService.convert(roomId, request.playerId(), request.convertCode()));
+        log.info("프리 변환: roomId={}, playerId={}, code={}, brainstone={}", roomId, request.playerId(), request.convertCode(), request.useBrainstone());
+        return ResponseEntity.ok(freeConvertService.convert(roomId, request.playerId(), request.convertCode(),
+                request.useBrainstone() != null && request.useBrainstone()));
     }
 
-    record FreeConvertRequest(UUID playerId, String convertCode) {}
+    record FreeConvertRequest(UUID playerId, String convertCode, Boolean useBrainstone) {}
 
     @Operation(summary = "종족 고유 능력 사용")
     @PostMapping("/faction-ability")
@@ -210,5 +212,24 @@ public class ActionController {
     ) {
         log.info("아이타 가이아 선택: roomId={}, playerId={}, action={}", roomId, request.playerId(), request.action());
         return ResponseEntity.ok(factionAbilityService.handleItarsRoundEndChoice(roomId, request));
+    }
+
+    @Operation(summary = "테란 가이아→자원 수동 변환")
+    @PostMapping("/terrans-gaia-convert")
+    public ResponseEntity<java.util.Map<String, Object>> terransGaiaConvert(
+            @PathVariable UUID roomId,
+            @RequestBody java.util.Map<String, Object> request
+    ) {
+        UUID playerId = UUID.fromString((String) request.get("playerId"));
+        int credits = (int) request.getOrDefault("credits", 0);
+        int ores = (int) request.getOrDefault("ores", 0);
+        int qics = (int) request.getOrDefault("qics", 0);
+        int knowledges = (int) request.getOrDefault("knowledges", 0);
+        try {
+            incomeService.applyTerransGaiaConvert(roomId, playerId, credits, ores, qics, knowledges);
+            return ResponseEntity.ok(java.util.Map.of("success", true));
+        } catch (Exception e) {
+            return ResponseEntity.ok(java.util.Map.of("success", false, "message", e.getMessage()));
+        }
     }
 }

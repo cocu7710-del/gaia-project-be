@@ -68,7 +68,8 @@ public class FederationController {
                         artifact.getArtifactType().name(),
                         artifact.getArtifactType().getDescription(),
                         artifact.getPosition(),
-                        artifact.getIsAcquired()
+                        artifact.getIsAcquired(),
+                        artifact.getAcquiredBy() != null ? artifact.getAcquiredBy().toString() : null
                 ))
                 .toList();
 

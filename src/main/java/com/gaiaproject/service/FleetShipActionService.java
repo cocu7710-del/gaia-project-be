@@ -49,6 +49,7 @@ public class FleetShipActionService {
     private final ActionService actionService;
     private final TechTileService techTileService;
     private final RoundScoringService roundScoringService;
+    private final ArtifactService artifactService;
     private final com.gaiaproject.repository.game.GameRepository gameRepository;
 
     /** 함대 선박 특수 액션 실행 */
@@ -86,7 +87,7 @@ public class FleetShipActionService {
                 case "TWILIGHT_FED" -> executeTwilightFed(gameId, playerId, ps, actionCode);
                 case "TWILIGHT_UPGRADE" -> executeTwilightUpgrade(gameId, playerId, ps, actionCode, request.hexQ(), request.hexR(), request.trackCode(), request.techTrackCode());
                 case "TWILIGHT_NAV" -> executeTwilightNav(gameId, playerId, ps, actionCode);
-                case "TWILIGHT_ARTIFACT" -> executeTwilightArtifact(gameId, playerId, ps, actionCode);
+                case "TWILIGHT_ARTIFACT" -> executeTwilightArtifact(gameId, playerId, ps, actionCode, request.trackCode());
 
                 default -> FleetShipActionResponse.fail(gameId, actionCode, "알 수 없는 함대 액션: " + actionCode);
             };
@@ -334,15 +335,16 @@ public class FleetShipActionService {
         return FleetShipActionResponse.success(gameId, code, 0, null, false);
     }
 
-    /** TWILIGHT_ARTIFACT: 파워 6 → 인공물 획득 (4 VP + 1 QIC, simplified) */
-    private FleetShipActionResponse executeTwilightArtifact(UUID gameId, UUID playerId, GamePlayerState ps, String code) {
-        ps.spendPower(6);
-        ps.addVP(4);
-        ps.addQic(1);
-        playerStateRepository.save(ps);
+    /** TWILIGHT_ARTIFACT: 파워 6 소각 → 인공물 선택 획득 */
+    private FleetShipActionResponse executeTwilightArtifact(UUID gameId, UUID playerId, GamePlayerState ps, String code, String artifactCode) {
+        if (artifactCode == null || artifactCode.isBlank()) {
+            return FleetShipActionResponse.fail(gameId, code, "인공물 코드가 필요합니다");
+        }
+        artifactService.acquireArtifact(gameId, playerId, artifactCode);
+        // acquireArtifact에서 파워 소각 + 즉시 효과 + DB 기록 모두 처리
         ConfirmActionResponse result = endTurn(gameId, playerId, code);
-        log.info("[함대] {}: game={}, player={}", code, gameId, playerId);
-        return FleetShipActionResponse.success(gameId, code, 4, result.nextTurnSeatNo(), true);
+        log.info("[함대] {}: game={}, player={}, artifact={}", code, gameId, playerId, artifactCode);
+        return FleetShipActionResponse.success(gameId, code, 0, result.nextTurnSeatNo(), true);
     }
 
     // ===========================
