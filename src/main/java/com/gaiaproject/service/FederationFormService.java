@@ -156,7 +156,7 @@ public class FederationFormService {
                 if (!inMST[i] && (u == -1 || minDist[i] < minDist[u])) u = i;
             }
             inMST[u] = true;
-            if (minDist[u] > 0) totalTokens += Math.max(0, minDist[u] - 1);
+            totalTokens += minDist[u]; // BFS가 이미 토큰 수를 반환
 
             // 인접 노드 업데이트
             for (int v = 0; v < n; v++) {
@@ -233,9 +233,11 @@ public class FederationFormService {
                 String neighbor = (q + d[0]) + "," + (r + d[1]);
                 if (visited.containsKey(neighbor)) continue;
 
-                // 도착지면 완료 (토큰 수 = 경로 길이 - 1, 시작/끝 제외)
+                // 도착지면 완료
                 if (neighbor.equals(endKey)) {
-                    return currentDist; // 시작 건물은 0부터, 중간 헥스 수 = 토큰 수
+                    // 현재 위치가 allowed(토큰 헥스)면 +1(현재 위치 토큰) 아님 — currentDist는 이미 현재까지 토큰 수
+                    log.info("[BFS] {} → {}: found at dist={}, via {}", startKey, endKey, currentDist, current);
+                    return currentDist;
                 }
 
                 // 건물 헥스면 통과 가능 (토큰 안 놓지만 연결 경로)
