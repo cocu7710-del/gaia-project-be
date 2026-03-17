@@ -138,6 +138,14 @@ public class FreeConvertService {
                     ps.addOre(2);
                     log.info("[FREE] 네블라 PI 4파워→2광석: player={}", playerId);
                 }
+                // 네블라 기본 능력: 3구역 토큰 1개 → 가이아 구역 + 지식 1
+                case "NEVLAS_POWER3_TO_GAIA_KNOWLEDGE" -> {
+                    if (ps.getPowerBowl3() < 1) throw new IllegalStateException("3구역 파워가 없습니다");
+                    ps.removePowerFromBowl3(1);
+                    ps.addGaiaPower(1);
+                    ps.addKnowledge(1);
+                    log.info("[FREE] 네블라 3구역→가이아+지식: player={}", playerId);
+                }
                 default -> { return FreeConvertResponse.fail("알 수 없는 변환 코드: " + convertCode); }
             }
         } catch (IllegalStateException e) {
