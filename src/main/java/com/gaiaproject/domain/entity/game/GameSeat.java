@@ -38,6 +38,8 @@ public class GameSeat {
     @Column(name = "turn_order", nullable = false)
     private int turnOrder;
 
+    public void setTurnOrder(int order) { this.turnOrder = order; }
+
     /**
      * 좌석에 고정된 종족.
      * - DB에는 Enum 이름(String)으로 저장된다.
