@@ -136,6 +136,11 @@ public class PassService {
                 .build();
         passRepository.save(pass);
 
+        // 이번 라운드 패스 순서 기록 (turnOrder: 0=미패스, 1~4=패스순서)
+        long passOrder = passRepository.countByGameIdAndRoundNumber(gameId, currentRound);
+        currentSeat.setTurnOrder((int) passOrder);
+        seatRepository.save(currentSeat);
+
         // 발타크: 패스 시 사용 가능한 포머 → QIC 자동 변환
         {
             GamePlayerState passPs = playerStateRepository.findByGameIdAndPlayerId(gameId, playerId).orElse(null);
@@ -265,27 +270,20 @@ public class PassService {
         int prevRound = game.getCurrentRound();
         game.nextRound();
 
-        // 패스 순서(passedAt)로 턴 순서 재배치
+        // 패스 순서(passedAt)로 다음 라운드 선 플레이어 결정
         List<GamePlayerPass> passes = passRepository.findByGameIdAndRoundNumber(gameId, prevRound);
         passes.sort((a, b) -> a.getPassedAt().compareTo(b.getPassedAt()));
         if (!passes.isEmpty()) {
-            // turn_order를 패스 순서대로 갱신 (1, 2, 3, 4) — 한번에 저장
-            List<com.gaiaproject.domain.entity.game.GameSeat> seatsToUpdate = new java.util.ArrayList<>();
-            for (int i = 0; i < passes.size(); i++) {
-                final int order = i + 1;
-                UUID pid = passes.get(i).getPlayerId();
-                seatRepository.findByGameIdAndPlayerId(gameId, pid)
-                        .ifPresent(seat -> {
-                            seat.setTurnOrder(order);
-                            seatsToUpdate.add(seat);
-                        });
-            }
-            seatRepository.saveAllAndFlush(seatsToUpdate);
-            // 첫 번째 패스 플레이어가 다음 라운드 선
             UUID firstPassedPlayerId = passes.get(0).getPlayerId();
             seatRepository.findByGameIdAndPlayerId(gameId, firstPassedPlayerId)
                     .ifPresent(seat -> game.nextTurn(seat.getSeatNo()));
         }
+        // turnOrder 전부 0으로 리셋 (새 라운드 시작)
+        List<com.gaiaproject.domain.entity.game.GameSeat> allSeats = seatRepository.findByGameIdOrderBySeatNo(gameId);
+        for (var seat : allSeats) {
+            seat.setTurnOrder(0);
+        }
+        seatRepository.saveAllAndFlush(allSeats);
         gameRepository.save(game);
 
         // 1. 수입 배분

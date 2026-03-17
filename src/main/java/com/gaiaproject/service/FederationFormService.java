@@ -1,6 +1,7 @@
 package com.gaiaproject.service;
 
 import com.gaiaproject.domain.entity.building.GameBuilding;
+import com.gaiaproject.domain.entity.map.GameHex;
 import com.gaiaproject.domain.entity.federation.GameFederationBuilding;
 import com.gaiaproject.domain.entity.federation.GameFederationGroup;
 import com.gaiaproject.domain.entity.federation.GameFederationTokenHex;
@@ -105,30 +106,36 @@ public class FederationFormService {
             return Map.of("success", false, "message", "파워가 부족합니다 (현재: " + totalPower + ", 필요: " + requiredPower + ")");
         }
 
-        // 최소 토큰 수 계산: 건물 그룹 간 최소 거리 합 (MST 방식)
+        // 최소 토큰 수 계산: BFS 실제 경로 (장애물 우회)
         Set<String> buildingSet = new HashSet<>();
         for (int[] h : buildingHexes) buildingSet.add(h[0] + "," + h[1]);
         int groups = countConnectedGroups(buildingSet);
-        int minTokens = calcMinTokensToConnect(buildingHexes);
+
+        // 토큰 배치 금지 헥스: 행성 + 기존 연방 + 기존 연방 인접
+        Set<String> blockedHexes = buildBlockedHexes(gameId, playerId, isIvits);
+        int minTokens = calcMinTokensToConnect(buildingHexes, gameId, blockedHexes, buildingSet);
 
         return Map.of("success", true, "totalPower", totalPower, "minTokens", minTokens, "groups", groups);
     }
 
     /**
-     * 선택한 건물들을 모두 연결하는 최소 토큰 수 계산 (Prim MST)
-     * 인접한 건물(거리1)은 토큰 0, 거리 N이면 토큰 N-1 필요
+     * 선택한 건물들을 모두 연결하는 최소 토큰 수 계산 (Prim MST + BFS 실제 경로)
+     * 장애물(행성, 기존 연방 헥스, 인접 금지) 우회하여 실제 빈 헥스 경로로 계산
      */
     private int calcMinTokensToConnect(List<int[]> buildingHexes) {
+        return calcMinTokensToConnect(buildingHexes, null, Set.of(), Set.of());
+    }
+
+    private int calcMinTokensToConnect(List<int[]> buildingHexes, UUID gameId,
+                                         Set<String> blockedHexes, Set<String> buildingHexSet) {
         if (buildingHexes.size() <= 1) return 0;
 
         int n = buildingHexes.size();
-        // 거리 행렬 계산
+        // BFS로 실제 경로 거리 계산 (장애물 우회)
         int[][] dist = new int[n][n];
         for (int i = 0; i < n; i++) {
             for (int j = i + 1; j < n; j++) {
-                int d = com.gaiaproject.util.HexUtil.distance(
-                        buildingHexes.get(i)[0], buildingHexes.get(i)[1],
-                        buildingHexes.get(j)[0], buildingHexes.get(j)[1]);
+                int d = bfsDistance(buildingHexes.get(i), buildingHexes.get(j), blockedHexes, buildingHexSet);
                 dist[i][j] = d;
                 dist[j][i] = d;
             }
@@ -142,13 +149,11 @@ public class FederationFormService {
         int totalTokens = 0;
 
         for (int count = 0; count < n; count++) {
-            // 최소 거리 노드 선택
             int u = -1;
             for (int i = 0; i < n; i++) {
                 if (!inMST[i] && (u == -1 || minDist[i] < minDist[u])) u = i;
             }
             inMST[u] = true;
-            // 인접 = 거리 1 → 토큰 0, 거리 d → 토큰 d-1
             if (minDist[u] > 0) totalTokens += Math.max(0, minDist[u] - 1);
 
             // 인접 노드 업데이트
@@ -160,6 +165,99 @@ public class FederationFormService {
         }
 
         return totalTokens;
+    }
+
+    /**
+     * 토큰 배치 금지 헥스 구성
+     * 1. 행성이 있는 헥스 (EMPTY가 아닌 모든 헥스)
+     * 2. 기존 연방 헥스 (건물 + 토큰) — 하이브 제외
+     * 3. 기존 연방 헥스의 인접 헥스 — 하이브 제외
+     */
+    private Set<String> buildBlockedHexes(UUID gameId, UUID playerId, boolean isIvits) {
+        Set<String> blocked = new HashSet<>();
+        int[][] dirs = {{1,0},{-1,0},{0,1},{0,-1},{1,-1},{-1,1}};
+
+        // 1. 행성 헥스 (EMPTY가 아닌 모든 헥스)
+        List<GameHex> allHexes = hexRepository.findByGameId(gameId);
+        for (GameHex hex : allHexes) {
+            String pt = hex.getPlanetType().name();
+            if (!"EMPTY".equals(pt)) {
+                blocked.add(hex.getHexQ() + "," + hex.getHexR());
+            }
+        }
+
+        // 2+3. 기존 연방 헥스 + 인접 (하이브 제외)
+        if (!isIvits) {
+            Set<String> fedHexes = getUsedFederationHexes(gameId, playerId);
+            blocked.addAll(fedHexes);
+            // 인접 헥스도 금지
+            for (String fedHex : fedHexes) {
+                String[] parts = fedHex.split(",");
+                int q = Integer.parseInt(parts[0]);
+                int r = Integer.parseInt(parts[1]);
+                for (int[] d : dirs) {
+                    blocked.add((q + d[0]) + "," + (r + d[1]));
+                }
+            }
+        }
+
+        return blocked;
+    }
+
+    /**
+     * BFS로 두 건물 간 실제 최단 토큰 수 계산
+     * 토큰 배치 가능 조건: EMPTY 헥스만 (행성/소행성/초월행성 불가), 기존 연방 헥스 및 인접 불가
+     * 건물 헥스는 통과 가능 (연결 대상이므로)
+     */
+    private int bfsDistance(int[] from, int[] to, Set<String> blockedHexes, Set<String> buildingHexSet) {
+        String startKey = from[0] + "," + from[1];
+        String endKey = to[0] + "," + to[1];
+        if (startKey.equals(endKey)) return 0;
+
+        // 인접하면 토큰 0
+        int directDist = com.gaiaproject.util.HexUtil.distance(from[0], from[1], to[0], to[1]);
+        if (directDist == 1) return 0;
+
+        // BFS
+        int[][] dirs = {{1,0},{-1,0},{0,1},{0,-1},{1,-1},{-1,1}};
+        Map<String, Integer> visited = new HashMap<>();
+        Queue<String> queue = new LinkedList<>();
+        queue.add(startKey);
+        visited.put(startKey, 0);
+
+        while (!queue.isEmpty()) {
+            String current = queue.poll();
+            int currentDist = visited.get(current);
+            String[] parts = current.split(",");
+            int q = Integer.parseInt(parts[0]);
+            int r = Integer.parseInt(parts[1]);
+
+            for (int[] d : dirs) {
+                String neighbor = (q + d[0]) + "," + (r + d[1]);
+                if (visited.containsKey(neighbor)) continue;
+
+                // 도착지면 완료 (토큰 수 = 경로 길이 - 1, 시작/끝 제외)
+                if (neighbor.equals(endKey)) {
+                    return currentDist; // 시작 건물은 0부터, 중간 헥스 수 = 토큰 수
+                }
+
+                // 건물 헥스면 통과 가능 (토큰 안 놓지만 연결 경로)
+                if (buildingHexSet.contains(neighbor)) {
+                    visited.put(neighbor, currentDist);
+                    queue.add(neighbor);
+                    continue;
+                }
+
+                // 금지 헥스 (기존 연방 + 인접): 통과 불가
+                if (blockedHexes.contains(neighbor)) continue;
+
+                // 토큰 배치 가능 체크는 호출부에서 blockedHexes에 포함시킴
+                visited.put(neighbor, currentDist + 1);
+                queue.add(neighbor);
+            }
+        }
+
+        return Integer.MAX_VALUE; // 연결 불가
     }
 
     /** BFS로 연결된 그룹 수 계산 */
