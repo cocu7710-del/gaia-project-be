@@ -60,11 +60,17 @@ public class FreeConvertService {
                     log.info("[FREE] 광석→3구역파워(XENOS): player={}", playerId);
                 }
                 case "POWER_TO_CREDIT" -> {
+                    boolean isNevlasPi = ps.getFactionType() == com.gaiaproject.domain.enumtype.player.FactionType.NEVLAS
+                            && ps.getStockPlanetaryInstitute() == 0;
                     if (useBrainstone) {
-                        // 브레인스톤(3파워) → 3크레딧
-                        ps.spendPower(3); // useBrainstone=true이므로 브레인스톤 이동
+                        ps.spendPower(3);
                         ps.addCredit(3);
                         log.info("[FREE] 브레인스톤→3크레딧: player={}", playerId);
+                    } else if (isNevlasPi) {
+                        // 네블라 PI: 1토큰 = 2파워 = 2크레딧
+                        ps.spendPower(1);
+                        ps.addCredit(2);
+                        log.info("[FREE] 네블라PI 파워1토큰→2크레딧: player={}", playerId);
                     } else {
                         ps.spendPower(1);
                         ps.addCredit(1);
