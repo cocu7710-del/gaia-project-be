@@ -312,9 +312,26 @@ public class FederationFormService {
             }
         }
 
-        List<int[]> buildingHexes = findConnectedBuildings(tokenHexes, myBuildingMap, usedFedHexes);
-        if (buildingHexes.isEmpty()) {
-            return FormFederationResponse.fail(gameId, "토큰에 연결된 건물이 없습니다");
+        // 토큰이 있으면 토큰 기반 BFS, 없으면 사용자 선택 건물 직접 사용
+        List<int[]> buildingHexes;
+        if (tokenHexes.isEmpty()) {
+            // 토큰 없이 건물만으로 연방 (인접한 건물들)
+            buildingHexes = request.buildingHexes() != null ? request.buildingHexes() : List.of();
+            if (buildingHexes.isEmpty()) {
+                return FormFederationResponse.fail(gameId, "연방에 포함할 건물을 선택해야 합니다");
+            }
+            // 선택된 건물이 실제 내 건물인지 검증
+            for (int[] hex : buildingHexes) {
+                String key = hex[0] + "," + hex[1];
+                if (!myBuildingMap.containsKey(key) || usedFedHexes.contains(key)) {
+                    return FormFederationResponse.fail(gameId, "유효하지 않은 건물이 포함되어 있습니다: (" + hex[0] + "," + hex[1] + ")");
+                }
+            }
+        } else {
+            buildingHexes = findConnectedBuildings(tokenHexes, myBuildingMap, usedFedHexes);
+            if (buildingHexes.isEmpty()) {
+                return FormFederationResponse.fail(gameId, "토큰에 연결된 건물이 없습니다");
+            }
         }
 
         List<GameBuilding> selectedBuildings = buildingHexes.stream()
@@ -395,9 +412,24 @@ public class FederationFormService {
             }
         }
 
-        List<int[]> buildingHexes = findConnectedBuildings(tokenHexes, myBuildingMap, usedFedHexes);
-        if (buildingHexes.isEmpty()) {
-            return FormFederationResponse.fail(gameId, "토큰에 연결된 건물이 없습니다");
+        // 토큰이 있으면 토큰 기반 BFS, 없으면 사용자 선택 건물 직접 사용
+        List<int[]> buildingHexes;
+        if (tokenHexes.isEmpty()) {
+            buildingHexes = request.buildingHexes() != null ? request.buildingHexes() : List.of();
+            if (buildingHexes.isEmpty()) {
+                return FormFederationResponse.fail(gameId, "연방에 포함할 건물을 선택해야 합니다");
+            }
+            for (int[] hex : buildingHexes) {
+                String key = hex[0] + "," + hex[1];
+                if (!myBuildingMap.containsKey(key) || usedFedHexes.contains(key)) {
+                    return FormFederationResponse.fail(gameId, "유효하지 않은 건물이 포함되어 있습니다: (" + hex[0] + "," + hex[1] + ")");
+                }
+            }
+        } else {
+            buildingHexes = findConnectedBuildings(tokenHexes, myBuildingMap, usedFedHexes);
+            if (buildingHexes.isEmpty()) {
+                return FormFederationResponse.fail(gameId, "토큰에 연결된 건물이 없습니다");
+            }
         }
 
         List<GameBuilding> selectedBuildings = new ArrayList<>();
