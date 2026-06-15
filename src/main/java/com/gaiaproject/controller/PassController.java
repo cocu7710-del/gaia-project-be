@@ -27,9 +27,13 @@ public class PassController {
             @PathVariable UUID roomId,
             @RequestBody PassRoundRequest request
     ) {
-        log.info("패스 요청: roomId={}, playerId={}, nextBooster={}",
-                roomId, request.playerId(), request.nextRoundBoosterCode());
-        PassRoundResponse response = passService.passRound(roomId, request.playerId(), request.nextRoundBoosterCode());
+        int burnCount = request.burnPowerCount() == null ? 0 : request.burnPowerCount();
+        int freeCount = request.freeConverts() == null ? 0 : request.freeConverts().size();
+        log.info("패스 요청: roomId={}, playerId={}, nextBooster={}, burn={}, freeConverts={}",
+                roomId, request.playerId(), request.nextRoundBoosterCode(), burnCount, freeCount);
+        PassRoundResponse response = passService.passRound(
+                roomId, request.playerId(), request.nextRoundBoosterCode(),
+                request.burnPowerCount(), request.freeConverts());
         return ResponseEntity.ok(response);
     }
 }

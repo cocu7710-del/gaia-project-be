@@ -7,13 +7,14 @@
   1. BE 로컬 실행 (gradlew bootRun)
   2. BE 터널 실행 → URL 복사
   3. .env.local + .env.tunnel에 BE 터널 URL 붙여넣기
-  4. FE 로컬 실행 (npm run dev)
+  4. FE 로컬 실행 (npm run dev)flyway_schema_history
   5. FE 터널 실행 → 이 URL이 외부 접속 주소
 
-  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), 'tester01');
-  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), 'tester02');
-  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), 'tester03');
-  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), 'tester04');
+
+  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), 'q');
+  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), 'w');
+  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), 'e');
+  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), 'r');
   INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), '루다');
   INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), '재원');
   INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), '남현');

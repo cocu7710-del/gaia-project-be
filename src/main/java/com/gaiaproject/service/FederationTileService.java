@@ -127,10 +127,16 @@ public class FederationTileService {
 
     /**
      * 연방 타일 수량 차감 (static, 외부 서비스에서 호출)
+     * — 일반 supply(position=null)와 잊힌 함대(position>=1)에서 차감.
+     *   보드 꼭대기 트랙 보상(position=0)은 제외 — 그건 handleTrackLevel5Entry 가 별도로 차감.
+     *   같은 tileType이 일반 supply와 트랙 보상에 동시 존재할 때(트랙용으로 뽑힌 기본 타일)
+     *   트랙 보상이 잘못 차감되는 버그 방지.
      */
     public static void acquireTileFromOffer(GameFederationOfferRepository repo, UUID gameId, FederationTileType tileType) {
         GameFederationOffer offer = repo.findByGameId(gameId).stream()
-                .filter(o -> o.getFederationTileType() == tileType && o.getQuantity() > 0)
+                .filter(o -> o.getFederationTileType() == tileType
+                        && o.getQuantity() > 0
+                        && (o.getPosition() == null || o.getPosition() != 0))
                 .findFirst()
                 .orElseThrow(() -> new IllegalStateException("해당 연방 타일을 찾을 수 없습니다: " + tileType));
         offer.decreaseQuantity();

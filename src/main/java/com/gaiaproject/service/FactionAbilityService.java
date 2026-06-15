@@ -66,7 +66,7 @@ public class FactionAbilityService {
     private final GaiaformingService gaiaformingService;
     private final PowerLeechService powerLeechService;
     private final RoundScoringService roundScoringService;
-    private final com.gaiaproject.repository.tech.GamePlayerTechTileRepository playerTechTileRepository;
+    private final GameCalculationService gameCalculationService;
 
     /** 의회 건설 여부 확인 */
     private boolean hasPi(GamePlayerState ps) {
@@ -439,6 +439,7 @@ public class FactionAbilityService {
         GamePlayerState ps = playerStateRepository.findByGameIdAndPlayerId(gameId, playerId)
                 .orElseThrow(() -> new IllegalStateException("플레이어 상태를 찾을 수 없습니다"));
 
+        com.gaiaproject.dto.TileAcquisitionResult tileResult = null;
         if ("TAKE_TILE".equals(request.action())) {
             if (ps.getGaiaPower() < 4) {
                 return FactionAbilityResponse.fail(gameId, "ITARS_GAIA_CHOICE", "가이아 파워 부족");
@@ -447,7 +448,7 @@ public class FactionAbilityService {
             playerStateRepository.save(ps);
 
             try {
-                techTileService.acquireTileForBuilding(gameId, playerId,
+                tileResult = techTileService.acquireTileForBuilding(gameId, playerId,
                         request.tileCode(), request.techTrackCode(), game.getEconomyTrackOption(),
                         request.coveredTileCode());
             } catch (IllegalStateException e) {
@@ -461,7 +462,25 @@ public class FactionAbilityService {
             // 다른 플레이어에게 상태 변경(기술타일/자원) 실시간 동기화
             webSocketService.broadcastStateUpdated(gameId);
 
+            // 후속 액션 필요 시 DEFERRED (가이아 잔량과 무관하게 즉시 처리)
+            if (tileResult != null && (tileResult.needsMine() || tileResult.needsLostPlanet())) {
+                gaiaformingService.returnGaiaPowerForPlayer(gameId, playerId);
+                game.setGamePhase("PLAYING");
+                gameRepository.save(game);
+                // 페이즈 변경 동기화 (ITARS_GAIA_PHASE → PLAYING)
+                webSocketService.broadcastStateUpdated(gameId);
+                if (tileResult.needsMine()) {
+                    webSocketService.broadcastDeferredActionRequired(gameId, playerId,
+                            "PLACE_MINE_TERRAFORM_2", String.format("{\"terraformDiscount\":2,\"triggerPlayerId\":\"%s\"}", playerId));
+                } else {
+                    webSocketService.broadcastDeferredActionRequired(gameId, playerId,
+                            "PLACE_LOST_PLANET", String.format("{\"triggerPlayerId\":\"%s\"}", playerId));
+                }
+                return FactionAbilityResponse.success(gameId, "ITARS_GAIA_CHOICE", null);
+            }
+
             // 아직 4개 이상 남아있으면 다시 선택 기회
+            ps = playerStateRepository.findByGameIdAndPlayerId(gameId, playerId).orElse(ps);
             if (ps.getGaiaPower() >= 4) {
                 webSocketService.broadcastItarsGaiaChoice(gameId, playerId, ps.getGaiaPower() / 4);
                 return FactionAbilityResponse.success(gameId, "ITARS_GAIA_CHOICE", null);
@@ -475,6 +494,8 @@ public class FactionAbilityService {
         gameRepository.save(game);
 
         webSocketService.broadcastRoundStarted(gameId, game.getCurrentRound());
+        // FE 가 currentTurnSeatNo 등 라운드 시작 상태를 받도록 snapshot 동기화 (BUG_REPORTS #17, #15 와 동일 패턴)
+        webSocketService.broadcastStateUpdated(gameId);
         log.info("[ITARS] 가이아 선택 완료, 라운드 {} 시작", game.getCurrentRound());
         return FactionAbilityResponse.success(gameId, "ITARS_GAIA_CHOICE", null);
     }
@@ -505,12 +526,21 @@ public class FactionAbilityService {
             return FactionAbilityResponse.fail(gameId, code, "이미 건물이 있는 위치입니다");
         }
 
+        // 연방 토큰 위 불가
+        var allGroups = federationFormService.getFederationGroups(gameId);
+        boolean hasFedToken = allGroups.stream()
+                .flatMap(g -> g.tokenHexes().stream())
+                .anyMatch(t -> t[0] == hexQ && t[1] == hexR);
+        if (hasFedToken) {
+            return FactionAbilityResponse.fail(gameId, code, "연방 토큰 위에 우주정거장을 배치할 수 없습니다");
+        }
+
         // 항법 거리 체크: 자기 건물(우주정거장 포함)로부터 항법 거리 이내
         int navRange = switch (ps.getTechNavigation()) {
             case 0 -> 1; case 1 -> 1; case 2 -> 2; case 3 -> 2; case 4 -> 3; default -> 4;
         };
         // BASIC_EXP_TILE_1 보유 시 항법 거리 +1
-        if (hasActiveTechTile(gameId, playerId, "BASIC_EXP_TILE_1")) {
+        if (gameCalculationService.hasActiveTechTile(gameId, playerId, "BASIC_EXP_TILE_1")) {
             navRange += 1;
         }
         // QIC로 항법 거리 확장 (QIC 1개당 +2)
@@ -612,6 +642,8 @@ public class FactionAbilityService {
         GameBuilding building = bOpt.get();
         if (building.isHasRing())
             return FactionAbilityResponse.fail(gameId, code, "이미 링이 씌워진 건물입니다");
+        if (building.getBuildingType() == BuildingType.GAIAFORMER)
+            return FactionAbilityResponse.fail(gameId, code, "가이아포머에는 링을 씌울 수 없습니다");
 
         building.applyRing();
         buildingRepository.save(building);
@@ -625,10 +657,4 @@ public class FactionAbilityService {
         return FactionAbilityResponse.success(gameId, code, result.nextTurnSeatNo());
     }
 
-    private boolean hasActiveTechTile(UUID gameId, UUID playerId, String tileCode) {
-        return playerTechTileRepository
-                .findByGameIdAndPlayerIdAndIsCovered(gameId, playerId, false)
-                .stream()
-                .anyMatch(t -> tileCode.equals(t.getTechTileCode()));
-    }
 }

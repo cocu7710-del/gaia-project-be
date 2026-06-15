@@ -1,13 +1,18 @@
 package com.gaiaproject.service;
 
+import com.gaiaproject.dto.response.GameSnapshot;
 import com.gaiaproject.dto.websocket.GameEvent;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -21,6 +26,11 @@ import java.util.UUID;
 public class GameWebSocketService {
 
     private final SimpMessagingTemplate messagingTemplate;
+
+    // 순환 의존성 방지를 위해 lazy 주입 (GameSnapshotService가 이 서비스를 쓸 수도 있음)
+    @Lazy
+    @Autowired
+    private GameSnapshotService gameSnapshotService;
 
     /**
      * 특정 방의 모든 클라이언트에게 이벤트 전송
@@ -82,10 +92,19 @@ public class GameWebSocketService {
     }
 
     /**
-     * 상태 갱신 이벤트 (범용)
+     * 상태 갱신 이벤트 (범용) — C안: 전체 hot state 스냅샷을 payload에 담아 broadcast.
+     * FE는 스냅샷을 받아 local state를 일괄 교체 (추가 fetch 불필요).
      */
     public void broadcastStateUpdated(UUID roomId) {
-        broadcast(GameEvent.stateUpdated(roomId));
+        try {
+            GameSnapshot snapshot = gameSnapshotService.buildSnapshot(roomId);
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("snapshot", snapshot);
+            broadcast(GameEvent.of(roomId, "STATE_UPDATED", payload));
+        } catch (Exception e) {
+            log.warn("[SNAPSHOT] 스냅샷 생성 실패, 빈 STATE_UPDATED 브로드캐스트: {}", e.getMessage());
+            broadcast(GameEvent.stateUpdated(roomId));
+        }
     }
 
     /**

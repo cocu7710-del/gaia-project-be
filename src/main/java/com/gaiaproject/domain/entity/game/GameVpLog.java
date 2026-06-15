@@ -25,6 +25,10 @@ public class GameVpLog {
     @Column(name = "player_id", nullable = false)
     private UUID playerId;
 
+    /** 디버깅용 비정규화 닉네임 — DB 트리거가 INSERT 시 자동 채움 */
+    @Column(name = "nickname", length = 50, insertable = false, updatable = false)
+    private String nickname;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "category", nullable = false, length = 50)
     private VpCategory category;

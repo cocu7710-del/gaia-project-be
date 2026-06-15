@@ -8,6 +8,6 @@ public record PassContextVo(
     int planetaryInstitutes,  // 행성의회(PI)
     int gaiaPlanets,          // 식민지화한 가이아 행성 수
     int gaiaformers,          // 보유한 가이아포머 수
-    int deepSectorStructures, // 깊은 구역 섹터의 구조물 수
+    int deepSectorStructures, // 건물이 있는 깊은 구역 섹터 수
     int colonizedPlanetTypeKinds // 식민지화한 행성 타입 "종류 수"
 ){}

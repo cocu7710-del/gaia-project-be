@@ -27,6 +27,9 @@ import com.gaiaproject.service.FactionAbilityService;
 import com.gaiaproject.dto.request.FactionAbilityRequest;
 import com.gaiaproject.dto.response.FactionAbilityResponse;
 import com.gaiaproject.service.FreeConvertService;
+import com.gaiaproject.service.CommitTurnService;
+import com.gaiaproject.dto.request.CommitTurnRequest;
+import com.gaiaproject.dto.response.CommitTurnResponse;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
@@ -54,6 +57,7 @@ public class ActionController {
     private final GaiaformingService gaiaformingService;
     private final FreeConvertService freeConvertService;
     private final com.gaiaproject.service.IncomeService incomeService;
+    private final CommitTurnService commitTurnService;
 
     @Operation(summary = "액션 저장 및 턴 넘김 (범용)")
     @PostMapping("/save")
@@ -67,14 +71,14 @@ public class ActionController {
         return ResponseEntity.ok(actionService.saveActionAndNextTurn(roomId, request.playerId(), actionType, actionData));
     }
 
-    @Operation(summary = "광산 건설 (PLAYING 페이즈)")
-    @PostMapping("/mine")
-    public ResponseEntity<PlaceMinePlayResponse> placeMine(
+    @Operation(summary = "턴 확정 (C안 commit-turn) — FE가 계산한 최종 상태를 1회 요청으로 전송")
+    @PostMapping("/commit-turn")
+    public ResponseEntity<CommitTurnResponse> commitTurn(
             @PathVariable UUID roomId,
-            @RequestBody PlaceMinePlayRequest request
+            @RequestBody CommitTurnRequest request
     ) {
-        log.info("광산 건설: roomId={}, playerId={}, ({},{})", roomId, request.playerId(), request.hexQ(), request.hexR());
-        return ResponseEntity.ok(buildingService.placeMineInPlay(roomId, request));
+        log.info("턴 확정: roomId={}, playerId={}", roomId, request.playerId());
+        return ResponseEntity.ok(commitTurnService.commit(roomId, request));
     }
 
     @Operation(summary = "검은행성 배치 (거리 트랙 5단계)")
@@ -83,18 +87,8 @@ public class ActionController {
             @PathVariable UUID roomId,
             @RequestBody PlaceMinePlayRequest request
     ) {
-        log.info("검은행성 배치: roomId={}, playerId={}, ({},{})", roomId, request.playerId(), request.hexQ(), request.hexR());
-        return ResponseEntity.ok(buildingService.placeLostPlanet(roomId, request.playerId(), request.hexQ(), request.hexR()));
-    }
-
-    @Operation(summary = "건물 업그레이드")
-    @PostMapping("/upgrade")
-    public ResponseEntity<UpgradeBuildingResponse> upgradeBuilding(
-            @PathVariable UUID roomId,
-            @RequestBody UpgradeBuildingRequest request
-    ) {
-        log.info("건물 업그레이드: roomId={}, playerId={}, ({},{}) → {}", roomId, request.playerId(), request.hexQ(), request.hexR(), request.targetBuildingType());
-        return ResponseEntity.ok(buildingService.upgradeBuildingInPlay(roomId, request));
+        log.info("검은행성 배치: roomId={}, playerId={}, ({},{}), qic={}", roomId, request.playerId(), request.hexQ(), request.hexR(), request.qicUsed());
+        return ResponseEntity.ok(buildingService.placeLostPlanet(roomId, request.playerId(), request.hexQ(), request.hexR(), request.qicUsed()));
     }
 
     @Operation(summary = "파워 액션 사용")
@@ -105,17 +99,6 @@ public class ActionController {
     ) {
         log.info("파워 액션: roomId={}, playerId={}, action={}", roomId, request.playerId(), request.powerActionCode());
         return ResponseEntity.ok(powerActionService.usePowerAction(roomId, request));
-    }
-
-    @Operation(summary = "파워 소각 (bowl2 -2, bowl3 +1, 자유 행동)")
-    @PostMapping("/burn-power")
-    public ResponseEntity<Void> burnPower(
-            @PathVariable UUID roomId,
-            @RequestBody UsePowerActionRequest request
-    ) {
-        log.info("파워 소각: roomId={}, playerId={}", roomId, request.playerId());
-        powerActionService.burnPower(roomId, request.playerId());
-        return ResponseEntity.ok().build();
     }
 
     @Operation(summary = "현재 라운드에서 사용된 파워 액션 코드 목록 조회")
@@ -181,19 +164,6 @@ public class ActionController {
 
     record UseTechTileActionRequest(UUID playerId, String tileCode) {}
 
-    @Operation(summary = "프리 액션: 자원 변환 (턴 소모 없음)")
-    @PostMapping("/free-convert")
-    public ResponseEntity<FreeConvertService.FreeConvertResponse> freeConvert(
-            @PathVariable UUID roomId,
-            @RequestBody FreeConvertRequest request
-    ) {
-        log.info("프리 변환: roomId={}, playerId={}, code={}, brainstone={}", roomId, request.playerId(), request.convertCode(), request.useBrainstone());
-        return ResponseEntity.ok(freeConvertService.convert(roomId, request.playerId(), request.convertCode(),
-                request.useBrainstone() != null && request.useBrainstone()));
-    }
-
-    record FreeConvertRequest(UUID playerId, String convertCode, Boolean useBrainstone) {}
-
     @Operation(summary = "종족 고유 능력 사용")
     @PostMapping("/faction-ability")
     public ResponseEntity<FactionAbilityResponse> useFactionAbility(
@@ -251,6 +221,15 @@ public class ActionController {
                 .orElseThrow(() -> new IllegalArgumentException("게임을 찾을 수 없습니다"));
         var player = playerStateRepository.findByGameIdAndPlayerId(roomId, playerId)
                 .orElseThrow(() -> new IllegalStateException("플레이어 상태를 찾을 수 없습니다"));
+        // 이미 이번 라운드에 파워 수입을 완료한 플레이어는 빈 목록 반환 (재수령 방지)
+        if (game.getCurrentRound() != null) {
+            boolean alreadyCompleted = gameActionRepository.findByGameIdAndRoundNumber(roomId, game.getCurrentRound()).stream()
+                    .anyMatch(a -> a.getPlayerId().equals(playerId)
+                            && a.getActionType() == com.gaiaproject.domain.enumtype.action.ActionType.POWER_INCOME);
+            if (alreadyCompleted) {
+                return ResponseEntity.ok(java.util.List.of());
+            }
+        }
         return ResponseEntity.ok(incomeService.calculatePowerIncomeItems(roomId, player, game.getEconomyTrackOption()));
     }
 
@@ -298,6 +277,16 @@ public class ActionController {
             var player = playerStateRepository.findByGameIdAndPlayerId(roomId, playerId)
                     .orElseThrow(() -> new IllegalStateException("플레이어 상태를 찾을 수 없습니다"));
 
+            // 이미 이번 라운드 파워 수입 완료한 플레이어는 중복 적용 차단
+            if (game.getCurrentRound() != null) {
+                boolean alreadyCompleted = gameActionRepository.findByGameIdAndRoundNumber(roomId, game.getCurrentRound()).stream()
+                        .anyMatch(a -> a.getPlayerId().equals(playerId)
+                                && a.getActionType() == com.gaiaproject.domain.enumtype.action.ActionType.POWER_INCOME);
+                if (alreadyCompleted) {
+                    return ResponseEntity.ok(java.util.Map.of("success", false, "message", "이미 파워 수입을 받았습니다."));
+                }
+            }
+
             // 항목 찾기
             var items = incomeService.calculatePowerIncomeItems(roomId, player, game.getEconomyTrackOption());
             var item = items.stream().filter(i -> i.id().equals(itemId)).findFirst()
@@ -325,6 +314,17 @@ public class ActionController {
             UUID playerId = UUID.fromString((String) request.get("playerId"));
             @SuppressWarnings("unchecked")
             java.util.List<String> itemIds = (java.util.List<String>) request.getOrDefault("itemIds", java.util.List.of());
+            // 중복 완료 차단 (새로고침 후 재완료 방지)
+            var game = gameRepository.findById(roomId)
+                    .orElseThrow(() -> new IllegalArgumentException("게임을 찾을 수 없습니다"));
+            if (game.getCurrentRound() != null) {
+                boolean alreadyCompleted = gameActionRepository.findByGameIdAndRoundNumber(roomId, game.getCurrentRound()).stream()
+                        .anyMatch(a -> a.getPlayerId().equals(playerId)
+                                && a.getActionType() == com.gaiaproject.domain.enumtype.action.ActionType.POWER_INCOME);
+                if (alreadyCompleted) {
+                    return ResponseEntity.ok(java.util.Map.of("success", false, "message", "이미 파워 수입을 완료했습니다."));
+                }
+            }
             passService.continueAfterPowerIncome(roomId, playerId, itemIds);
             return ResponseEntity.ok(java.util.Map.of("success", true));
         } catch (Exception e) {

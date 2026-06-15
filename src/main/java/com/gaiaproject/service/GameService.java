@@ -94,6 +94,7 @@ public class GameService {
     /** 함대 탐사선 저장소 **/
     private final com.gaiaproject.repository.player.GamePlayerFleetProbeRepository fleetProbeRepository;
     private final com.gaiaproject.repository.game.GamePlayerPassRepository gamePlayerPassRepository;
+    private final com.gaiaproject.repository.player.GamePlayerFederationTokenRepository playerFederationTokenRepository;
 
     /** 액션 서비스 (턴 타이머) **/
     private final ActionService actionService;
@@ -146,6 +147,11 @@ public class GameService {
 
         /* 종족 4개 랜덤 선택(Enum 기반) */
         List<FactionType> factionTypeResult = setupGameSeats(game.getId(), playerCount);
+
+        /* 팅커로이드/모웨이드 3삽 행성 할당 */
+        List<GameSeat> newSeats = gameSeatRepository.findByGameIdOrderBySeatNoAsc(game.getId());
+        assignExtraRingPlanetsIfNeeded(game, newSeats);
+        gameRepository.save(game);
 
         /* 라운드 부스터 셋팅 */
         roundBoosterService.initializeBoosters(game, playerCount);
@@ -248,10 +254,6 @@ public class GameService {
         if (!"MAP_ROTATE".equals(game.getGamePhase())) {
             throw new IllegalStateException("4명 입장 후 맵 회전 페이즈에서만 비딩을 시작할 수 있습니다.");
         }
-        // 비딩 시작 전 팅커로이드/모웨이드 추가 3삽 행성 할당 (캐릭터 판에 표시)
-        List<GameSeat> seats = gameSeatRepository.findByGameIdOrderBySeatNoAsc(roomId);
-        assignExtraRingPlanetsIfNeeded(game, seats);
-        gameRepository.save(game);
         biddingService.startBidding(roomId);
     }
 
@@ -568,6 +570,8 @@ public class GameService {
                     gameRepository.save(game);
                     webSocketService.broadcast(com.gaiaproject.dto.websocket.GameEvent.of(roomId, "POWER_INCOME_CHOICE",
                             java.util.Map.of("players", allPlayerItems)));
+                    // C안: 페이즈 변경 + 수입 반영 snapshot 브로드캐스트
+                    webSocketService.broadcastStateUpdated(roomId);
                     log.info("R1 파워 수입 동시 선택 대기: game={}, 대상 {}명", roomId, allPlayerItems.size());
                     return SelectBoosterResponse.success(roomId, nextSeatNo);
                 }
@@ -593,6 +597,8 @@ public class GameService {
                     game.setGamePhase("TINKEROIDS_ACTION_PHASE");
                     gameRepository.save(game);
                     webSocketService.broadcastTinkeroidsActionChoice(roomId, tinkeroidsPlayer.getPlayerId(), available, round);
+                    // C안: 페이즈 변경 snapshot 브로드캐스트
+                    webSocketService.broadcastStateUpdated(roomId);
                     return SelectBoosterResponse.success(roomId, nextSeatNo);
                 }
             }
@@ -656,6 +662,8 @@ public class GameService {
 
         // 6) WebSocket 브로드캐스트 - 게임 시작 알림
         webSocketService.broadcastGameStarted(roomId, game.getGamePhase(), game.getCurrentSetupSeatNo());
+        // 비딩 완료 → SETUP_MINE_FIRST 전환 시 FE 가 gamePhase/nextSetupSeatNo 외에 전체 상태 동기화하도록 snapshot 브로드캐스트 (BUG_REPORTS #18, #15/#17 과 동일 패턴)
+        webSocketService.broadcastStateUpdated(roomId);
 
         return StartGameResponse.startMinePlacement(roomId, game.getCurrentSetupSeatNo(), game.getGamePhase());
     }
@@ -807,6 +815,9 @@ public class GameService {
                 .map(p -> {
                     boolean hasQicAcademy = gameBuildingRepository.countByGameIdAndPlayerIdAndBuildingTypeAndAcademyType(
                             roomId, p.getPlayerId(), BuildingType.ACADEMY, AcademyType.QIC) > 0;
+                    var fedTokens = playerFederationTokenRepository.findByGameIdAndPlayerId(roomId, p.getPlayerId()).stream()
+                            .map(t -> new PlayerStateResponse.FederationTokenDto(t.getFederationTileType().name(), t.isUsed()))
+                            .toList();
                     return new PlayerStateResponse(
                         p.getPlayerId(),
                         p.getSeatNo(),
@@ -840,9 +851,11 @@ public class GameService {
                         hasQicAcademy,
                         p.isQicAcademyActionUsed(),
                         p.getTinkeroidsCurrentAction(),
+                        p.getFederationCount(),
                         p.getBidPenalty(),
                         p.getUsedTimeSeconds(),
-                        p.getTurnStartedAt() != null ? String.valueOf(p.getTurnStartedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()) : null
+                        p.getTurnStartedAt() != null ? String.valueOf(p.getTurnStartedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()) : null,
+                        fedTokens
                     );
                 })
                 .collect(Collectors.toList());

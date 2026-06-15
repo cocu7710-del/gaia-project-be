@@ -63,7 +63,7 @@ public class TechTileService {
     private final com.gaiaproject.repository.player.GamePlayerFleetProbeRepository fleetProbeRepository;
     private final GameWebSocketService webSocketService;
     private final VpLogService vpLogService;
-    private final com.gaiaproject.repository.player.GamePlayerArtifactRepository playerArtifactRepository;
+    private final GameCalculationService gameCalculationService;
 
     /** 지식 트랙 전진 (지식 4 소모, PLAYING 페이즈) */
     public AdvanceTechResponse advanceTechTrack(UUID gameId, AdvanceTechRequest request) {
@@ -96,6 +96,9 @@ public class TechTileService {
         };
         if (currentLevel == 4 && isTrackLevel5Occupied(gameId, request.playerId(), request.trackCode())) {
             return AdvanceTechResponse.fail(gameId, "이미 다른 플레이어가 해당 트랙 5단계에 있습니다.");
+        }
+        if (currentLevel == 4 && !hasUsableFederationToken(gameId, request.playerId())) {
+            return AdvanceTechResponse.fail(gameId, "5단계 진입에는 사용 가능한 연방 토큰이 필요합니다.");
         }
 
         try {
@@ -154,25 +157,35 @@ public class TechTileService {
      * @param coveredTileCode 고급 타일 획득 시 덮을 기본 타일 코드 (nullable, 고급 타일일 때 필수)
      * @throws IllegalStateException 유효하지 않은 타일 또는 중복 소유 시
      */
-    public void acquireTileForBuilding(UUID gameId, UUID playerId, String tileCode,
+    public com.gaiaproject.dto.TileAcquisitionResult acquireTileForBuilding(UUID gameId, UUID playerId, String tileCode,
                                        String techTrackCode, EconomyTrackOption economyOption,
                                        String coveredTileCode) {
         log.info("[acquireTileForBuilding] 진입: game={}, player={}, tile={}, track={}, cover={}",
                 gameId, playerId, tileCode, techTrackCode, coveredTileCode);
 
-        boolean isAdvanced = tileCode.startsWith("ADV_");
+        // NAV 레벨 기록 (4→5 검은행성 판단용)
+        GamePlayerState psBefore = gamePlayerStateRepository.findByGameIdAndPlayerId(gameId, playerId).orElse(null);
+        int navBefore = psBefore != null ? psBefore.getTechNavigation() : 0;
 
+        boolean isAdvanced = tileCode.startsWith("ADV_");
         if (isAdvanced) {
             acquireAdvancedTile(gameId, playerId, tileCode, techTrackCode, economyOption, coveredTileCode);
         } else {
             acquireBasicTile(gameId, playerId, tileCode, techTrackCode, economyOption);
         }
+
+        // 후속 액션 판단
+        boolean needsMine = "BASIC_EXP_TILE_3".equals(tileCode);
+        GamePlayerState psAfter = gamePlayerStateRepository.findByGameIdAndPlayerId(gameId, playerId).orElse(null);
+        boolean needsLostPlanet = psAfter != null && navBefore < 5 && psAfter.getTechNavigation() == 5;
+
+        return new com.gaiaproject.dto.TileAcquisitionResult(needsMine, needsLostPlanet);
     }
 
     /** 하위 호환: coveredTileCode 없이 호출 (기본 타일 전용) */
-    public void acquireTileForBuilding(UUID gameId, UUID playerId, String tileCode,
+    public com.gaiaproject.dto.TileAcquisitionResult acquireTileForBuilding(UUID gameId, UUID playerId, String tileCode,
                                        String techTrackCode, EconomyTrackOption economyOption) {
-        acquireTileForBuilding(gameId, playerId, tileCode, techTrackCode, economyOption, null);
+        return acquireTileForBuilding(gameId, playerId, tileCode, techTrackCode, economyOption, null);
     }
 
     /**
@@ -202,8 +215,19 @@ public class TechTileService {
         String tileTrack = offer.getTechTrack();
         String advanceTrack;
         if ("COMMON".equals(tileTrack) || "EXPANSION".equals(tileTrack)) {
-            if (techTrackCode == null || techTrackCode.isBlank())
-                throw new IllegalStateException("공용/확장 타일은 트랙 코드가 필요합니다");
+            if (techTrackCode == null || techTrackCode.isBlank()) {
+                // 트랙 코드 없으면 전진 스킵 — 즉발 효과는 적용
+                TechAbility earlyAbility = techTileCode.getAbility();
+                if (earlyAbility.getType() == TechAbilityType.IMMEDIATE) {
+                    GamePlayerState psEarly = gamePlayerStateRepository.findByGameIdAndPlayerId(gameId, playerId).orElse(null);
+                    if (psEarly != null) {
+                        applyImmediateTileEffect(gameId, playerId, psEarly, techTileCode, earlyAbility);
+                        gamePlayerStateRepository.save(psEarly);
+                    }
+                }
+                log.info("[기본 타일] 트랙 코드 없음 → 타일만 획득, 전진 스킵: player={}, tile={}", playerId, tileCode);
+                return;
+            }
             advanceTrack = techTrackCode;
         } else {
             advanceTrack = tileTrack;
@@ -221,16 +245,24 @@ public class TechTileService {
         int newLevel = getTrackLevel(ps, advanceTrack);
         // 5단계 점유 시 4→5 진입 불가 → 타일만 획득, 트랙 전진 스킵
         boolean skipLevel5Block = (newLevel == 4 && isTrackLevel5Occupied(gameId, playerId, advanceTrack));
-        if (!skipTrackAdvance && !skipLevel5Block) {
+        // 4→5 진입 시 연방 토큰 없으면 전진 스킵 (타일만 획득)
+        boolean hasFedToken = hasUsableFederationToken(gameId, playerId);
+        boolean skipNoFedToken = (newLevel == 4 && !hasFedToken);
+        // 이미 5단계 → 더 이상 전진 불가 (타일만 획득)
+        boolean alreadyAtMax = newLevel >= 5;
+        log.info("[BASIC_TILE_ADVANCE] track={}, level={}, skipTrack={}, skipL5={}, hasFedToken={}, skipNoFed={}, atMax={}",
+                advanceTrack, newLevel, skipTrackAdvance, skipLevel5Block, hasFedToken, skipNoFedToken, alreadyAtMax);
+        if (!skipTrackAdvance && !skipLevel5Block && !skipNoFedToken && !alreadyAtMax) {
             String fieldName = trackCodeToFieldName(advanceTrack);
             ps.advanceTechTrackNoKnowledge(fieldName);
 
             newLevel = getTrackLevel(ps, advanceTrack);
             applyTechTrackReward(ps, advanceTrack, newLevel, economyOption);
 
-            // 라운드 점수 타일
+            // 라운드 점수 타일 (아이타 가이아 페이즈 포함 — 라운드는 이미 시작된 상태)
             Game tileGame = gameRepository.findById(gameId).orElse(null);
-            if (tileGame != null && "PLAYING".equals(tileGame.getGamePhase()) && tileGame.getCurrentRound() != null) {
+            if (tileGame != null && tileGame.getCurrentRound() != null
+                    && ("PLAYING".equals(tileGame.getGamePhase()) || "ITARS_GAIA_PHASE".equals(tileGame.getGamePhase()))) {
                 roundScoringService.award(gameId, tileGame.getCurrentRound(), ps, RoundScoringEvent.RESEARCH_ADVANCED, 1);
             }
         }
@@ -321,8 +353,16 @@ public class TechTileService {
                 .gameId(gameId).playerId(playerId).techTileCode(tileCode).build());
 
         // 9. 트랙 결정 (모든 고급 타일은 플레이어가 원하는 트랙으로 전진)
-        if (techTrackCode == null || techTrackCode.isBlank())
-            throw new IllegalStateException("고급 타일 획득 시 전진할 트랙 코드가 필요합니다");
+        // 트랙 코드 없으면 전진 스킵 (올라갈 수 있는 트랙이 없는 경우) — 즉발 효과는 적용
+        if (techTrackCode == null || techTrackCode.isBlank()) {
+            TechAbility earlyAbility = advTileCode.getAbility();
+            if (earlyAbility.getType() == TechAbilityType.IMMEDIATE) {
+                applyImmediateAdvTileEffect(gameId, playerId, ps, advTileCode, earlyAbility);
+            }
+            gamePlayerStateRepository.save(ps);
+            log.info("[고급 타일] 트랙 코드 없음 → 타일만 획득, 전진 스킵: player={}, tile={}", playerId, tileCode);
+            return;
+        }
         String advanceTrack = techTrackCode;
 
         // 10. 트랙 전진 + 보상 (발타크: PI 건설 전 NAVIGATION 스킵)
@@ -332,7 +372,9 @@ public class TechTileService {
 
         int newLevel = getTrackLevel(ps, advanceTrack);
         boolean skipAdvLevel5Block = (newLevel == 4 && isTrackLevel5Occupied(gameId, playerId, advanceTrack));
-        if (!skipAdvTrack && !skipAdvLevel5Block) {
+        // 4→5 진입 시 연방 토큰 없으면 전진 스킵 (고급 타일 획득으로 이미 1개 소모된 상태)
+        boolean skipAdvNoFedToken = (newLevel == 4 && !hasUsableFederationToken(gameId, playerId));
+        if (!skipAdvTrack && !skipAdvLevel5Block && !skipAdvNoFedToken) {
             String fieldName = trackCodeToFieldName(advanceTrack);
             ps.advanceTechTrackNoKnowledge(fieldName);
 
@@ -394,7 +436,9 @@ public class TechTileService {
                 ps.addOre((int) count);
             }
             case "VP_PER_MINE" -> {
-                int mines = 8 - ps.getStockMine();
+                // getMineCount(8 - stockMine)에 란티다 기생 광산도 이미 포함됨
+                // (기생 광산도 광산 토큰을 소모하므로 stockMine 에 반영됨 — 별도 합산 시 이중 카운트)
+                int mines = gameCalculationService.getMineCount(gameId, playerId, ps.getStockMine());
                 vp = mines * 2;
             }
             case "VP_PER_TRADING_STATION" -> {
@@ -402,14 +446,15 @@ public class TechTileService {
                 vp = ts * 4;
             }
             case "VP_PER_FEDERATION_TOKEN" -> {
-                vp = ps.getFederationCount() * 5;
+                int tokenCount = (int) playerFederationTokenRepository.countByGameIdAndPlayerId(gameId, playerId);
+                vp = tokenCount * 5;
             }
             case "VP_PER_GAIA_PLANET" -> {
                 long gaiaCount = gameBuildingRepository.findByGameIdAndPlayerId(gameId, playerId).stream()
                         .filter(b -> b.getBuildingType() != BuildingType.GAIAFORMER && !b.isLantidsMine())
                         .filter(b -> {
                             var hex = gameHexRepository.findByGameIdAndHexQAndHexR(gameId, b.getHexQ(), b.getHexR());
-                            return hex.isPresent() && "GAIA".equals(hex.get().getPlanetType());
+                            return hex.isPresent() && hex.get().getPlanetType() == com.gaiaproject.domain.enumtype.player.PlanetType.GAIA;
                         }).count();
                 vp = (int) gaiaCount * 2;
             }
@@ -456,14 +501,14 @@ public class TechTileService {
         };
     }
 
-    /** 건물이 있는 일반 섹터 수 카운트 (DEEP_ 제외) */
+    /** 건물이 있는 일반 섹터 수 카운트 (DEEP_/1헥스 섹터 제외 — SECTOR_* 19헥스만) */
     private long countSectorsWithBuildings(UUID gameId, UUID playerId) {
         Set<String> sectors = new HashSet<>();
         for (var b : gameBuildingRepository.findByGameIdAndPlayerId(gameId, playerId)) {
             if (b.getBuildingType() == BuildingType.GAIAFORMER || b.isLantidsMine()) continue;
             gameHexRepository.findByGameIdAndHexQAndHexR(gameId, b.getHexQ(), b.getHexR())
                     .ifPresent(h -> {
-                        if (h.getSectorId() != null && !h.getSectorId().startsWith("DEEP_")) {
+                        if (h.getSectorId() != null && h.getSectorId().startsWith("SECTOR_")) {
                             sectors.add(h.getSectorId());
                         }
                     });
@@ -491,97 +536,30 @@ public class TechTileService {
         switch (specialEffect) {
             case "KNOWLEDGE_PER_PLANET_TYPE" -> {
                 // 플레이어 건물이 있는 행성 종류 수만큼 지식 획득
-                // SPACE_STATION(빈 헥스)·GAIAFORMER(TRANSDIM)은 행성이 아니므로 제외
-                List<GameBuilding> buildings = gameBuildingRepository.findByGameIdAndPlayerId(gameId, playerId);
-                Set<String> planetTypes = new HashSet<>();
-                for (GameBuilding b : buildings) {
-                    if (b.getBuildingType() == BuildingType.SPACE_STATION
-                            || b.getBuildingType() == BuildingType.GAIAFORMER
-                            || b.isLantidsMine()) continue;
-                    gameHexRepository.findByGameIdAndHexQAndHexR(gameId, b.getHexQ(), b.getHexR())
-                            .map(GameHex::getPlanetType)
-                            .ifPresent(pt -> {
-                                if (pt != null && pt != PlanetType.EMPTY && pt != PlanetType.TRANSDIM) planetTypes.add(pt.name());
-                            });
-                }
-                // 인공물 가상 행성 종류
-                if (playerArtifactRepository.existsByGameIdAndPlayerIdAndArtifactType(gameId, playerId, "ARTIFACT_7")) planetTypes.add("ASTEROIDS");
-                if (playerArtifactRepository.existsByGameIdAndPlayerIdAndArtifactType(gameId, playerId, "ARTIFACT_8")) planetTypes.add("LOST_PLANET");
-                ps.addKnowledge(planetTypes.size());
-                log.info("[TILE_IMMEDIATE] KNOWLEDGE_PER_PLANET_TYPE: 행성 종류={}, 지식+={}", planetTypes.size(), planetTypes.size());
+                List<GameBuilding> buildings = gameBuildingRepository.findByGameIdAndPlayerId(gameId, playerId).stream()
+                        .filter(b -> b.getBuildingType() != BuildingType.GAIAFORMER)
+                        .toList();
+                List<GameHex> allHexes = gameHexRepository.findByGameId(gameId);
+                java.util.Map<String, GameHex> hexByCoord = new java.util.HashMap<>();
+                for (GameHex h : allHexes) hexByCoord.put(h.getHexQ() + "," + h.getHexR(), h);
+                // 행성 종류별 디버깅
+                java.util.Set<com.gaiaproject.domain.enumtype.player.PlanetType> debugTypes = buildings.stream()
+                        .filter(b -> !b.isLantidsMine())
+                        .map(b -> hexByCoord.get(b.getHexQ() + "," + b.getHexR()))
+                        .filter(java.util.Objects::nonNull)
+                        .map(GameHex::getPlanetType)
+                        .filter(p -> p != com.gaiaproject.domain.enumtype.player.PlanetType.EMPTY && p != com.gaiaproject.domain.enumtype.player.PlanetType.TRANSDIM)
+                        .collect(java.util.stream.Collectors.toSet());
+                boolean hasArt7 = gameCalculationService.hasArtifact(gameId, playerId, "ARTIFACT_7");
+                boolean hasArt8 = gameCalculationService.hasArtifact(gameId, playerId, "ARTIFACT_8");
+                log.info("[TILE_IMMEDIATE] KNOWLEDGE_PER_PLANET_TYPE 디버깅: 건물행성={}, ARTIFACT_7={}, ARTIFACT_8={}", debugTypes, hasArt7, hasArt8);
+                int planetTypeCount = gameCalculationService.getPlanetTypeCount(buildings, hexByCoord, gameId, playerId);
+                ps.addKnowledge(planetTypeCount);
+                log.info("[TILE_IMMEDIATE] KNOWLEDGE_PER_PLANET_TYPE: 행성 종류={}, 지식+={}", planetTypeCount, planetTypeCount);
             }
             case "TERRAFORM_2_PLACE_MINE" -> {
                 // FE에서 pending 체인으로 처리 (업그레이드 확정 → 광산 배치 → 확정)
                 log.info("[TILE_IMMEDIATE] TERRAFORM_2_PLACE_MINE - FE pending 체인 처리, game={}, player={}", gameId, playerId);
-            }
-            case "VP_PER_FEDERATION_TOKEN" -> {
-                int tokenCount = federationGroupRepository.findByGameIdAndPlayerId(gameId, playerId).size();
-                int vp = tokenCount * 5;
-                if (vp > 0) {
-                    ps.addVP(vp);
-                    vpLogService.logVp(gameId, playerId, VpCategory.ADV_TECH_TILE, vp, null, "연방 토큰당 5VP (" + tokenCount + "개)");
-                }
-                log.info("[TILE_IMMEDIATE] VP_PER_FEDERATION_TOKEN: tokens={}, vp={}", tokenCount, vp);
-            }
-            case "VP_PER_GAIA_PLANET" -> {
-                long gaiaCount = gameBuildingRepository.findByGameIdAndPlayerId(gameId, playerId).stream()
-                        .filter(b -> b.getBuildingType() != BuildingType.GAIAFORMER && !b.isLantidsMine())
-                        .filter(b -> {
-                            var hex = gameHexRepository.findByGameIdAndHexQAndHexR(gameId, b.getHexQ(), b.getHexR()).orElse(null);
-                            return hex != null && hex.getPlanetType() == com.gaiaproject.domain.enumtype.player.PlanetType.GAIA;
-                        }).count();
-                int vp = (int) gaiaCount * 3;
-                if (vp > 0) {
-                    ps.addVP(vp);
-                    vpLogService.logVp(gameId, playerId, VpCategory.ADV_TECH_TILE, vp, null, "가이아 행성당 3VP (" + gaiaCount + "개)");
-                }
-                log.info("[TILE_IMMEDIATE] VP_PER_GAIA_PLANET: gaia={}, vp={}", gaiaCount, vp);
-            }
-            case "VP_PER_SECTOR_BUILDING" -> {
-                Set<String> sectors = new HashSet<>();
-                for (var b : gameBuildingRepository.findByGameIdAndPlayerId(gameId, playerId)) {
-                    if (b.getBuildingType() == BuildingType.GAIAFORMER || b.isLantidsMine()) continue;
-                    gameHexRepository.findByGameIdAndHexQAndHexR(gameId, b.getHexQ(), b.getHexR())
-                            .ifPresent(h -> {
-                                if (h.getSectorId() != null && !h.getSectorId().startsWith("DEEP_")) {
-                                    sectors.add(h.getSectorId());
-                                }
-                            });
-                }
-                int vp = sectors.size() * 2;
-                if (vp > 0) {
-                    ps.addVP(vp);
-                    vpLogService.logVp(gameId, playerId, VpCategory.ADV_TECH_TILE, vp, null, "섹터당 2VP (" + sectors.size() + "개)");
-                }
-                log.info("[TILE_IMMEDIATE] VP_PER_SECTOR_BUILDING: sectors={}, vp={}", sectors.size(), vp);
-            }
-            case "VP_PER_MINE" -> {
-                long mineCount = gameBuildingRepository.findByGameIdAndPlayerId(gameId, playerId).stream()
-                        .filter(b -> b.getBuildingType() == com.gaiaproject.domain.enumtype.building.BuildingType.MINE).count();
-                int vp = (int) mineCount * 2;
-                if (vp > 0) {
-                    ps.addVP(vp);
-                    vpLogService.logVp(gameId, playerId, VpCategory.ADV_TECH_TILE, vp, null, "광산당 2VP (" + mineCount + "개)");
-                }
-                log.info("[TILE_IMMEDIATE] VP_PER_MINE: mines={}, vp={}", mineCount, vp);
-            }
-            case "VP_PER_TRADING_STATION" -> {
-                long tsCount = gameBuildingRepository.findByGameIdAndPlayerId(gameId, playerId).stream()
-                        .filter(b -> b.getBuildingType() == com.gaiaproject.domain.enumtype.building.BuildingType.TRADING_STATION).count();
-                int vp = (int) tsCount * 4;
-                if (vp > 0) {
-                    ps.addVP(vp);
-                    vpLogService.logVp(gameId, playerId, VpCategory.ADV_TECH_TILE, vp, null, "교역소당 4VP (" + tsCount + "개)");
-                }
-                log.info("[TILE_IMMEDIATE] VP_PER_TRADING_STATION: ts={}, vp={}", tsCount, vp);
-            }
-            case "VP_PER_TERRAFORMING_STEP" -> {
-                int vp = ps.getTechTerraforming() * 2;
-                if (vp > 0) {
-                    ps.addVP(vp);
-                    vpLogService.logVp(gameId, playerId, VpCategory.ADV_TECH_TILE, vp, null, "테라포밍 단계당 2VP (" + ps.getTechTerraforming() + "단계)");
-                }
-                log.info("[TILE_IMMEDIATE] VP_PER_TERRAFORMING_STEP: level={}, vp={}", ps.getTechTerraforming(), vp);
             }
             default -> {
                 ability.applyTo(ps);
@@ -792,7 +770,9 @@ public class TechTileService {
         // 5트랙 진입: 사용 가능한 연방 토큰 1개 뒤집기 필요
         if (newLevel == 5) {
             if (!flipUsableFederationToken(ps.getGameId(), ps.getPlayerId())) {
-                throw new IllegalStateException("5단계 진입에는 사용 가능한 연방 토큰이 필요합니다");
+                // 연방 토큰 없이 5단계에 도달한 경우 (방어) — 트랙은 올라갔지만 보상/토큰 없음
+                log.warn("[TECH_LV5] 연방 토큰 뒤집기 실패 (토큰 없음): player={}, track={}", ps.getPlayerId(), trackCode);
+                return;
             }
             // 테라포밍 5단계: 해당 칸의 연방 타일 획득
             if ("TERRA_FORMING".equals(trackCode)) {
@@ -852,6 +832,12 @@ public class TechTileService {
                 }
                 default -> {} // TERRA_FORMING은 연방 타일 위에서 처리, NAVIGATION은 검은행성(별도)
             }
+            // PASSIVE: ADV_TILE_18 - 5단계 진입도 전진이므로 2VP
+            if (gameCalculationService.hasActiveTechTile(ps.getGameId(), ps.getPlayerId(), "ADV_TILE_18")) {
+                ps.addVP(2);
+                vpLogService.logVp(ps.getGameId(), ps.getPlayerId(), VpCategory.ADV_TECH_TILE, 2, null, "ADV_TILE_18 지식트랙 전진 2VP (5단계)");
+                log.info("[PASSIVE ADV_18] 지식트랙 5단계 진입 2VP: player={}, track={}", ps.getPlayerId(), trackCode);
+            }
             log.info("[TECH_LV5] 연방 토큰 뒤집기 + 5단계 보상 완료: player={}, track={}", ps.getPlayerId(), trackCode);
             return;
         }
@@ -887,6 +873,13 @@ public class TechTileService {
             // SCIENCE: 지식 수입은 라운드 수입 단계에서 처리 (즉각 보상 없음)
         }
 
+        // PASSIVE: ADV_TILE_18 - 지식 트랙 전진당 2VP
+        if (gameCalculationService.hasActiveTechTile(ps.getGameId(), ps.getPlayerId(), "ADV_TILE_18")) {
+            ps.addVP(2);
+            vpLogService.logVp(ps.getGameId(), ps.getPlayerId(), VpCategory.ADV_TECH_TILE, 2, null, "ADV_TILE_18 지식트랙 전진 2VP");
+            log.info("[PASSIVE ADV_18] 지식트랙 전진 2VP: player={}, track={}", ps.getPlayerId(), trackCode);
+        }
+
         log.info("[TECH_REWARD] player={}, track={}, level={}", ps.getPlayerId(), trackCode, newLevel);
     }
 
@@ -910,14 +903,43 @@ public class TechTileService {
     }
 
     /**
+     * C안 commit-turn 지원: 트랙 4→5 진입 시 BE 측 side effect 처리.
+     * - 연방 토큰 1개 플립 (사용 가능한 것)
+     * - TERRA 5단계: Terra 트랙 위 연방 토큰 획득 (오퍼에서 차감 + 플레이어 토큰 추가)
+     * - 즉시 보상(자원/VP)은 FE 프리뷰가 이미 playerState에 반영했으므로 BE는 건너뜀.
+     */
+    public void handleTrackLevel5Entry(UUID gameId, UUID playerId, String trackCode) {
+        // 연방 토큰 플립은 FE commit-turn 의 flippedFederationTokens 에서 처리 (이중 플립 방지)
+        // 여기서는 TERRA 5단계의 트랙 위 연방 토큰 획득만 담당
+        if ("TERRA_FORMING".equals(trackCode)) {
+            federationOfferRepository.findByGameIdAndPosition(gameId, 0).ifPresent(offer -> {
+                if (offer.getQuantity() > 0) {
+                    offer.decreaseQuantity();
+                    federationOfferRepository.save(offer);
+                    playerFederationTokenRepository.save(
+                            com.gaiaproject.domain.entity.player.GamePlayerFederationToken.builder()
+                                    .gameId(gameId).playerId(playerId)
+                                    .federationTileType(offer.getFederationTileType()).build());
+                    log.info("[COMMIT_TURN LV5] TERRA 5단계 연방 토큰 획득: player={}, tile={}",
+                            playerId, offer.getFederationTileType());
+                }
+            });
+        }
+    }
+
+    /**
      * 사용 가능한 연방 토큰 1개 뒤집기 (고급 기술타일 획득 / 5트랙 진입 시 필요)
      * 연방 그룹 토큰 또는 직접 보유 토큰 중 useFederation=true이고 아직 사용 안 한 것을 뒤집음.
      * @return true if flipped, false if no usable token
      */
     public boolean flipUsableFederationToken(UUID gameId, UUID playerId) {
         log.info("[FED_FLIP] 시도: player={}", playerId);
-        // 1. 연방 그룹에서 사용 가능한 토큰 찾기
+        // 그룹에 대응하는 토큰 코드 수집 (player_token 중복 방지용)
         var groups = federationGroupRepository.findByGameIdAndPlayerId(gameId, playerId);
+        java.util.Set<String> groupTileCodes = new java.util.HashSet<>();
+        for (var g : groups) groupTileCodes.add(g.getFederationTileCode());
+
+        // 1. 연방 그룹에서 사용 가능한 토큰 찾기
         log.info("[FED_FLIP] 그룹 수: {}", groups.size());
         for (var g : groups) {
             if (!g.isUsed()) {
@@ -926,6 +948,15 @@ public class TechTileService {
                     if (tileType.isUseFederation()) {
                         g.markUsed();
                         federationGroupRepository.save(g);
+                        // 대응하는 player_token도 동기화
+                        var tokens = playerFederationTokenRepository.findByGameIdAndPlayerId(gameId, playerId);
+                        for (var t : tokens) {
+                            if (!t.isUsed() && t.getFederationTileType().name().equals(g.getFederationTileCode())) {
+                                t.markUsed();
+                                playerFederationTokenRepository.save(t);
+                                break;
+                            }
+                        }
                         log.info("[FED_FLIP] 연방 그룹 토큰 뒤집기: player={}, tile={}", playerId, g.getFederationTileCode());
                         return true;
                     }
@@ -933,7 +964,7 @@ public class TechTileService {
             }
         }
 
-        // 2. 직접 보유 토큰에서 사용 가능한 것 찾기 (글린 PI 등)
+        // 2. 직접 보유 토큰에서 사용 가능한 것 찾기 (그룹에 속하지 않는 토큰만: 테라5 보상, 글린 PI 등)
         var tokens = playerFederationTokenRepository.findByGameIdAndPlayerId(gameId, playerId);
         log.info("[FED_FLIP] 직접 보유 토큰 수: {}", tokens.size());
         for (var t : tokens) {
@@ -941,6 +972,14 @@ public class TechTileService {
             if (!t.isUsed() && t.getFederationTileType().isUseFederation()) {
                 t.markUsed();
                 playerFederationTokenRepository.save(t);
+                // 대응하는 group도 동기화
+                for (var g : groups) {
+                    if (!g.isUsed() && g.getFederationTileCode().equals(t.getFederationTileType().name())) {
+                        g.markUsed();
+                        federationGroupRepository.save(g);
+                        break;
+                    }
+                }
                 log.info("[FED_FLIP] 직접 보유 토큰 뒤집기: player={}, tile={}", playerId, t.getFederationTileType());
                 return true;
             }

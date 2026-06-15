@@ -22,7 +22,6 @@ import com.gaiaproject.repository.game.GameRepository;
 import com.gaiaproject.repository.game.GameSeatRepository;
 import com.gaiaproject.repository.map.GameHexRepository;
 import com.gaiaproject.repository.player.GamePlayerStateRepository;
-import com.gaiaproject.repository.tech.GamePlayerTechTileRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -45,12 +44,12 @@ public class BuildingService {
     private final GameWebSocketService webSocketService;
     private final ActionService actionService;
     private final TechTileService techTileService;
-    private final GamePlayerTechTileRepository playerTechTileRepository;
     private final RoundScoringService roundScoringService;
     private final PowerLeechService powerLeechService;
     private final com.gaiaproject.repository.player.GamePlayerFederationTokenRepository federationTokenRepository;
     private final FederationFormService federationFormService;
     private final VpLogService vpLogService;
+    private final GameCalculationService gameCalculationService;
 
     /**
      * 초기 광산 배치 (게임 시작 전)
@@ -211,358 +210,6 @@ public class BuildingService {
     }
 
     /**
-     * 건물 업그레이드 (PLAYING 페이즈)
-     */
-    @Transactional
-    public UpgradeBuildingResponse upgradeBuildingInPlay(UUID gameId, UpgradeBuildingRequest request) {
-        Game game = gameRepository.findById(gameId)
-                .orElseThrow(() -> new IllegalArgumentException("게임을 찾을 수 없습니다"));
-
-        if (!"PLAYING".equals(game.getGamePhase())) {
-            return UpgradeBuildingResponse.fail(gameId, "PLAYING 페이즈가 아닙니다");
-        }
-
-        // 건물 조회 (메인 건물, 란티다 기생 제외)
-        GameBuilding building = gameBuildingRepository
-                .findFirstByGameIdAndHexQAndHexRAndIsLantidsMine(gameId, request.hexQ(), request.hexR(), false)
-                .orElse(null);
-        if (building == null) return UpgradeBuildingResponse.fail(gameId, "건물을 찾을 수 없습니다");
-        if (!building.getPlayerId().equals(request.playerId())) return UpgradeBuildingResponse.fail(gameId, "본인 건물이 아닙니다");
-        if (building.isLantidsMine()) return UpgradeBuildingResponse.fail(gameId, "란티다 특수 광산은 업그레이드할 수 없습니다");
-
-        BuildingType fromType = building.getBuildingType();
-        BuildingType targetType;
-        try {
-            targetType = BuildingType.valueOf(request.targetBuildingType());
-        } catch (Exception e) {
-            return UpgradeBuildingResponse.fail(gameId, "잘못된 건물 타입입니다");
-        }
-
-        // 업그레이드 경로 유효성 검증
-        // 매안(BESCODS): 교역소→아카데미 허용 (교역소→연구소→PI, 교역소→아카데미)
-        var upgradePlayerState = gamePlayerStateRepository.findByGameIdAndPlayerId(gameId, request.playerId()).orElse(null);
-        boolean isBescods = upgradePlayerState != null && upgradePlayerState.getFactionType() == FactionType.BESCODS;
-        boolean validPath = switch (fromType) {
-            case MINE -> targetType == BuildingType.TRADING_STATION;
-            case TRADING_STATION -> {
-                if (isBescods) {
-                    // 매안: 교역소→연구소 or 아카데미 (PI 불가)
-                    yield targetType == BuildingType.RESEARCH_LAB || targetType == BuildingType.ACADEMY;
-                }
-                yield targetType == BuildingType.RESEARCH_LAB || targetType == BuildingType.PLANETARY_INSTITUTE;
-            }
-            case RESEARCH_LAB -> {
-                if (isBescods) {
-                    // 매안: 연구소→PI
-                    yield targetType == BuildingType.PLANETARY_INSTITUTE;
-                }
-                yield targetType == BuildingType.ACADEMY;
-            }
-            default -> false;
-        };
-        if (!validPath) return UpgradeBuildingResponse.fail(gameId, "업그레이드 경로가 올바르지 않습니다");
-
-        GamePlayerState playerState = gamePlayerStateRepository.findByGameIdAndPlayerId(gameId, request.playerId())
-                .orElseThrow(() -> new IllegalStateException("플레이어 상태를 찾을 수 없습니다"));
-
-        // 2거리 이내 다른 플레이어 건물 목록
-        List<GameBuilding> allBuildings = gameBuildingRepository.findByGameId(gameId);
-        boolean hasEnemyNeighbor = allBuildings.stream()
-                .anyMatch(b -> !b.getPlayerId().equals(request.playerId())
-                        && hexDistance(request.hexQ(), request.hexR(), b.getHexQ(), b.getHexR()) <= 2);
-
-        // 비용 검증 및 지불 (upgradeCore에서 재고 처리하므로 여기서는 비용만)
-        try {
-            switch (targetType) {
-                case TRADING_STATION -> {
-                    if (playerState.getStockTradingStation() <= 0) return UpgradeBuildingResponse.fail(gameId, "교역소 재고가 없습니다");
-                    int creditCost = hasEnemyNeighbor ? 3 : 6;
-                    playerState.spendCredit(creditCost);
-                    playerState.spendOre(2);
-                }
-                case RESEARCH_LAB -> {
-                    if (playerState.getStockResearchLab() <= 0) return UpgradeBuildingResponse.fail(gameId, "연구소 재고가 없습니다");
-                    playerState.spendCredit(5);
-                    playerState.spendOre(3);
-                }
-                case PLANETARY_INSTITUTE -> {
-                    if (playerState.getStockPlanetaryInstitute() <= 0) return UpgradeBuildingResponse.fail(gameId, "행성 의회 재고가 없습니다");
-                    playerState.spendCredit(6);
-                    playerState.spendOre(4);
-                }
-                case ACADEMY -> {
-                    if (playerState.getStockAcademy() <= 0) return UpgradeBuildingResponse.fail(gameId, "아카데미 재고가 없습니다");
-                    if (request.academyType() == null || request.academyType().isBlank()) {
-                        return UpgradeBuildingResponse.fail(gameId, "아카데미 종류를 선택해야 합니다 (KNOWLEDGE / QIC)");
-                    }
-                    try {
-                        com.gaiaproject.domain.enumtype.building.AcademyType.valueOf(request.academyType());
-                    } catch (Exception e) {
-                        return UpgradeBuildingResponse.fail(gameId, "잘못된 아카데미 종류입니다: " + request.academyType());
-                    }
-                    playerState.spendCredit(6);
-                    playerState.spendOre(6);
-                }
-                default -> { return UpgradeBuildingResponse.fail(gameId, "업그레이드 불가 건물 타입"); }
-            }
-        } catch (IllegalStateException e) {
-            return UpgradeBuildingResponse.fail(gameId, e.getMessage());
-        }
-        gamePlayerStateRepository.save(playerState);
-
-        // 공용 코어: 재고/건물/기술타일/라운드점수/리치 처리
-        String actionData = String.format("{\"hexQ\":%d,\"hexR\":%d,\"from\":\"%s\",\"to\":\"%s\"}", request.hexQ(), request.hexR(), fromType, targetType);
-        try {
-            String error = upgradeCore(game, request.playerId(), building, targetType,
-                    request.academyType(), request.techTileCode(), request.techTrackCode(), request.coveredTileCode(),
-                    ActionType.UPGRADE_BUILDING, actionData, true,
-                    request.lostPlanetHexQ(), request.lostPlanetHexR());
-            if (error != null) return UpgradeBuildingResponse.fail(gameId, error);
-        } catch (IllegalStateException e) {
-            return UpgradeBuildingResponse.fail(gameId, e.getMessage());
-        }
-
-        return UpgradeBuildingResponse.success(gameId, request.hexQ(), request.hexR(), fromType.name(), targetType.name(), 0);
-    }
-
-    /**
-     * PLAYING 페이즈 광산 건설
-     */
-    @Transactional
-    public PlaceMinePlayResponse placeMineInPlay(UUID gameId, PlaceMinePlayRequest request) {
-        Game game = gameRepository.findById(gameId)
-                .orElseThrow(() -> new IllegalArgumentException("게임을 찾을 수 없습니다"));
-
-        if (!"PLAYING".equals(game.getGamePhase())) {
-            return PlaceMinePlayResponse.fail(gameId, "PLAYING 페이즈가 아닙니다");
-        }
-
-        // 헥스 유효성 확인
-        GameHex hex = gameHexRepository.findByGameIdAndHexQAndHexR(gameId, request.hexQ(), request.hexR())
-                .orElse(null);
-        if (hex == null) return PlaceMinePlayResponse.fail(gameId, "유효하지 않은 좌표입니다");
-
-        // 기존 건물 확인 (메인 건물 우선, 란티다 기생 제외)
-        GameBuilding existingBuilding = gameBuildingRepository
-                .findFirstByGameIdAndHexQAndHexRAndIsLantidsMine(gameId, request.hexQ(), request.hexR(), false)
-                .orElse(null);
-
-        boolean isGaiaformerReturn = existingBuilding != null
-                && existingBuilding.getBuildingType() == BuildingType.GAIAFORMER
-                && existingBuilding.getPlayerId().equals(request.playerId())
-                && hex.getPlanetType() == PlanetType.GAIA;
-
-        // 플레이어 상태 및 자원 확인 (란티다 판단을 위해 먼저 조회)
-        GamePlayerState playerState = gamePlayerStateRepository.findByGameIdAndPlayerId(gameId, request.playerId())
-                .orElseThrow(() -> new IllegalStateException("플레이어 상태를 찾을 수 없습니다"));
-
-        boolean isLantidsMine = false;
-        if (existingBuilding != null && !isGaiaformerReturn) {
-            // 란티다: 타인 건물이 있는 위치에 광산 건설 가능
-            boolean isOpponentBuilding = !existingBuilding.getPlayerId().equals(request.playerId());
-            if (playerState.getFactionType() == FactionType.LANTIDS && isOpponentBuilding) {
-                isLantidsMine = true; // 업그레이드 불가 광산
-            } else {
-                return PlaceMinePlayResponse.fail(gameId, "이미 건물이 있는 위치입니다");
-            }
-        }
-
-        if (playerState.getStockMine() <= 0) return PlaceMinePlayResponse.fail(gameId, "광산 재고가 없습니다");
-
-        if (request.freeMine()) {
-            // 무료 광산: 기본 비용(2c+1o) 없음
-            // terraformDiscount > 0 인 경우 2삽/3삽 할인 후 남은 테라포밍 광석 청구
-            // (FED_EXP_TILE_7: discount=0 → 완전 무료, BASIC_EXP_TILE_3: discount=2, FED_EXP_TILE_5: discount=3)
-            try {
-                if (request.terraformDiscount() > 0) {
-                    int terraformingOre = calcTerraformingOre(
-                            playerState.getFactionType(), hex.getPlanetType(),
-                            playerState.getTechTerraforming(), request.terraformDiscount()
-                    );
-                    if (terraformingOre > 0) playerState.spendOre(terraformingOre);
-                }
-                if (request.qicUsed() > 0) playerState.spendQic(request.qicUsed());
-            } catch (IllegalStateException e) {
-                return PlaceMinePlayResponse.fail(gameId, e.getMessage());
-            }
-        } else if (isLantidsMine) {
-            // 란티다 기생 광산: 2c + 1o + 항법 QIC (테라포밍 비용 없음)
-            try {
-                playerState.spendCredit(2);
-                playerState.spendOre(1);
-                if (request.qicUsed() > 0) playerState.spendQic(request.qicUsed());
-            } catch (IllegalStateException e) {
-                return PlaceMinePlayResponse.fail(gameId, e.getMessage());
-            }
-        } else if (isGaiaformerReturn) {
-            // 가이아포머가 있는 가이아 행성 → 광산 건설: QIC 면제, 포머 반환
-            try {
-                playerState.spendCredit(2);
-                playerState.spendOre(1);
-                if (request.qicUsed() > 0) playerState.spendQic(request.qicUsed()); // 항법 QIC만
-            } catch (IllegalStateException e) {
-                return PlaceMinePlayResponse.fail(gameId, e.getMessage());
-            }
-            playerState.addGaiaformer(1); // 포머 반환
-        } else if (request.gaiaformerUsed() || hex.getPlanetType() == PlanetType.ASTEROIDS) {
-            // 소행성 건설: 가이아포머 1개 영구 제거 (팅커로이드/다카니안 포함 모든 종족)
-            if (playerState.getStockGaiaformer() <= 0) {
-                return PlaceMinePlayResponse.fail(gameId, "사용 가능한 가이아포머가 없습니다");
-            }
-            playerState.permanentlyRemoveGaiaformer();
-            if (request.qicUsed() > 0) playerState.spendQic(request.qicUsed());
-        } else {
-            // 일반 건설: 2c + 1o + 테라포밍 광석
-            int terraformingOre = calcTerraformingOre(
-                    playerState.getFactionType(),
-                    hex.getPlanetType(),
-                    playerState.getTechTerraforming(),
-                    request.terraformDiscount()
-            );
-            // 글린: 가이아 행성 직접 입장 시 QIC 1개 대신 ORE 1개 추가 지불
-            int gleensGaiaOre = (hex.getPlanetType() == PlanetType.GAIA
-                    && playerState.getFactionType() == FactionType.GLEENS) ? 1 : 0;
-            try {
-                playerState.spendCredit(2);
-                playerState.spendOre(1 + terraformingOre + gleensGaiaOre);
-                if (request.qicUsed() > 0) playerState.spendQic(request.qicUsed());
-            } catch (IllegalStateException e) {
-                return PlaceMinePlayResponse.fail(gameId, e.getMessage());
-            }
-        }
-
-        // 원시행성/검은행성 건설 보너스 VP (+6)
-        if (hex.getPlanetType() == PlanetType.LOST_PLANET || hex.getPlanetType() == PlanetType.BLACK_PLANET) {
-            playerState.addVP(6);
-            vpLogService.logVp(playerState.getGameId(), playerState.getPlayerId(), VpCategory.OTHER, 6, null, "Lost Planet mine bonus");
-        }
-
-        // PASSIVE: BASIC_TILE_8 - 가이아 구역 광산 건설 시 VP +3
-        if (hex.getPlanetType() == PlanetType.GAIA
-                && hasActiveTechTile(gameId, request.playerId(), "BASIC_TILE_8")) {
-            playerState.addVP(3);
-            vpLogService.logVp(playerState.getGameId(), playerState.getPlayerId(), VpCategory.OTHER, 3, null, "BASIC_TILE_8 Gaia mine bonus");
-            log.info("[PASSIVE TILE_8] 가이아 구역 광산 VP +3: player={}", request.playerId());
-        }
-
-        // PASSIVE: ADV_TILE_10 - 테라포밍 1삽당 2VP
-        if (!isLantidsMine && !isGaiaformerReturn && hex.getPlanetType() != PlanetType.GAIA && !request.gaiaformerUsed()) {
-            if (hasActiveTechTile(gameId, request.playerId(), "ADV_TILE_10")) {
-                int steps = calcRawTerraformingSteps(playerState.getFactionType(), hex.getPlanetType());
-                if (steps > 0) {
-                    int advVp = steps * 2;
-                    playerState.addVP(advVp);
-                    vpLogService.logVp(gameId, request.playerId(), VpCategory.ADV_TECH_TILE, advVp, null, "ADV_TILE_10 테라포밍 " + steps + "삽 × 2VP");
-                    log.info("[PASSIVE ADV_10] 테라포밍 {}삽 × 2VP = {}VP: player={}", steps, advVp, request.playerId());
-                }
-            }
-        }
-
-        // PASSIVE: ADV_TILE_16 - 광산 건설 시 3VP
-        if (hasActiveTechTile(gameId, request.playerId(), "ADV_TILE_16")) {
-            playerState.addVP(3);
-            vpLogService.logVp(gameId, request.playerId(), VpCategory.ADV_TECH_TILE, 3, null, "ADV_TILE_16 광산 건설 3VP");
-            log.info("[PASSIVE ADV_16] 광산 건설 3VP: player={}", request.playerId());
-        }
-
-        // 글린 고유 능력: 가이아 행성 광산 건설 시 VP +2
-        if (hex.getPlanetType() == PlanetType.GAIA
-                && playerState.getFactionType() == FactionType.GLEENS) {
-            playerState.addVP(2);
-            vpLogService.logVp(playerState.getGameId(), playerState.getPlayerId(), VpCategory.OTHER, 2, null, "Gleens Gaia mine bonus");
-            log.info("[GLEENS] 가이아 광산 VP +2: player={}", request.playerId());
-        }
-
-        // 기오덴 PI: 새 행성 타입 개척 시 +3 지식 (란티다 기생 제외, 기존에 없는 행성 타입만)
-        if (!isLantidsMine
-                && playerState.getFactionType() == FactionType.GEODENS
-                && hasPlanetaryInstitute(playerState)
-                && isNewPlanetTypeForPlayer(gameId, request.playerId(), hex.getPlanetType())) {
-            playerState.addKnowledge(3);
-            log.info("[GEODENS PI] 새 행성 타입 개척 지식 +3: player={}, planet={}", request.playerId(), hex.getPlanetType());
-        }
-
-        // 란티다 PI: 타인 건물 위치에 광산 기생 시 +2 지식
-        if (isLantidsMine && hasPlanetaryInstitute(playerState)) {
-            playerState.addKnowledge(2);
-            log.info("[LANTIDS PI] 기생 광산 지식 +2: player={}", request.playerId());
-        }
-
-        // 다카니안 PI: 새로운 섹터에 광산 건설 시 +2 크레딧, +1 지식
-        if (playerState.getFactionType() == FactionType.DAKANIANS
-                && hasPlanetaryInstitute(playerState)
-                && isNewSectorForPlayer(gameId, request.playerId(), hex.getSectorId())) {
-            playerState.addCredit(2);
-            playerState.addKnowledge(1);
-            log.info("[DAKANIANS PI] 새 섹터 광산 보너스: player={}", request.playerId());
-        }
-
-        // 라운드 점수 타일 적용
-        int mineRound = game.getCurrentRound() != null ? game.getCurrentRound() : 1;
-
-        // 광산 건설
-        roundScoringService.award(gameId, mineRound, playerState, RoundScoringEvent.MINE_PLACED, 1);
-
-        // 가이아 행성 개척 (가이아포머 반환 또는 글린 직접 건설)
-        if (hex.getPlanetType() == PlanetType.GAIA) {
-            roundScoringService.award(gameId, mineRound, playerState, RoundScoringEvent.GAIA_PLANET_COLONIZED, 1);
-        }
-
-        // 테라포밍 단계 (일반 건설만, 가이아포머/소행성/란티다/가이아 제외)
-        if (!isGaiaformerReturn && hex.getPlanetType() != PlanetType.GAIA && !request.gaiaformerUsed() && !isLantidsMine) {
-            int terraformSteps = calcRawTerraformingSteps(playerState.getFactionType(), hex.getPlanetType());
-            if (terraformSteps > 0) {
-                roundScoringService.award(gameId, mineRound, playerState, RoundScoringEvent.TERRAFORM_STEP, terraformSteps);
-            }
-        }
-
-        // 새로운 섹터 진출
-        if (isNewSectorForPlayer(gameId, request.playerId(), hex.getSectorId())) {
-            roundScoringService.award(gameId, mineRound, playerState, RoundScoringEvent.NEW_SECTOR_ENTERED, 1);
-        }
-
-        // 새로운 행성 종류 개척 (란티다 기생 제외)
-        if (!isLantidsMine && isNewPlanetTypeForPlayer(gameId, request.playerId(), hex.getPlanetType())) {
-            roundScoringService.award(gameId, mineRound, playerState, RoundScoringEvent.NEW_PLANET_TYPE_COLONIZED, 1);
-        }
-
-        playerState.decreaseStockMine();
-        gamePlayerStateRepository.save(playerState);
-
-        // 건물 배치 (가이아포머 반환 시 기존 건물을 MINE으로 업그레이드, 아니면 새로 생성)
-        GameBuilding mine;
-        if (isGaiaformerReturn) {
-            existingBuilding.upgrade(BuildingType.MINE);
-            mine = gameBuildingRepository.save(existingBuilding);
-        } else {
-            mine = GameBuilding.place(gameId, request.playerId(), request.hexQ(), request.hexR(), BuildingType.MINE);
-            if (isLantidsMine) mine.markAsLantidsMine();
-            gameBuildingRepository.save(mine);
-        }
-
-        log.info("광산 건설 (PLAYING): game={}, player={}, ({},{})", gameId, request.playerId(), request.hexQ(), request.hexR());
-
-        // 인접 연방에 자동 편입
-        federationFormService.autoJoinFederation(gameId, request.playerId(), request.hexQ(), request.hexR());
-
-        // 액션 저장 (턴 진행은 리치 해소 후)
-        String actionData = String.format("{\"hexQ\":%d,\"hexR\":%d}", request.hexQ(), request.hexR());
-        actionService.saveActionOnly(gameId, request.playerId(), ActionType.PLACE_MINE, actionData);
-
-        // 파워 리치 처리 (자동/수동 결정 포함, 턴 진행까지 담당)
-        List<GameBuilding> allBuildings = gameBuildingRepository.findByGameId(gameId);
-        if (request.hasFollowUp()) {
-            // 후속 액션 있음 → 리치 해소 후 DEFERRED (턴 안 넘김)
-            String followUpData = String.format("{\"triggerPlayerId\":\"%s\"}", request.playerId());
-            powerLeechService.createBatchAndProcess(game, request.playerId(), request.hexQ(), request.hexR(), BuildingType.MINE, allBuildings, "PLACE_LOST_PLANET", followUpData);
-        } else {
-            powerLeechService.createBatchAndProcess(game, request.playerId(), request.hexQ(), request.hexR(), BuildingType.MINE, allBuildings, null, null);
-        }
-
-        return PlaceMinePlayResponse.success(gameId, request.hexQ(), request.hexR(), 0);
-    }
-
-    /**
      * 건물 업그레이드 공용 코어 로직
      * - 일반 업그레이드(upgradeBuildingInPlay)와 함대 액션 업그레이드(FleetShipActionService)에서 공유
      * - 비용 지불은 호출자가 처리, 여기서는 재고/건물/기술타일/라운드점수/리치 처리
@@ -585,7 +232,8 @@ public class BuildingService {
             BuildingType targetType, String academyType,
             String techTileCode, String techTrackCode, String coveredTileCode,
             ActionType actionType, String actionData, boolean awardRoundScoring,
-            Integer lostPlanetHexQ, Integer lostPlanetHexR) {
+            Integer lostPlanetHexQ, Integer lostPlanetHexR,
+            Integer mineHexQ, Integer mineHexR, Integer mineQicUsed) {
 
         UUID gameId = game.getId();
         BuildingType fromType = building.getBuildingType();
@@ -629,7 +277,7 @@ public class BuildingService {
         log.info("건물 업그레이드: game={}, player={}, ({},{}) {}→{}", gameId, playerId, building.getHexQ(), building.getHexR(), fromType, targetType);
 
         // PASSIVE: ADV_TILE_17 - 교역소 건설 시 3VP
-        if (targetType == BuildingType.TRADING_STATION && hasActiveTechTile(gameId, playerId, "ADV_TILE_17")) {
+        if (targetType == BuildingType.TRADING_STATION && gameCalculationService.hasActiveTechTile(gameId, playerId, "ADV_TILE_17")) {
             playerState.addVP(3);
             vpLogService.logVp(gameId, playerId, VpCategory.ADV_TECH_TILE, 3, null, "ADV_TILE_17 교역소 건설 3VP");
             gamePlayerStateRepository.save(playerState);
@@ -668,12 +316,15 @@ public class BuildingService {
         gamePlayerStateRepository.save(playerState);
 
         // 기술 타일 획득 (연구소/아카데미/스페이스자이언트 의회)
+        com.gaiaproject.dto.TileAcquisitionResult tileResult = null;
         boolean isTileEligible = targetType == BuildingType.RESEARCH_LAB
                 || targetType == BuildingType.ACADEMY
                 || (targetType == BuildingType.PLANETARY_INSTITUTE
                     && playerState.getFactionType() == FactionType.SPACE_GIANTS);
         if (isTileEligible && techTileCode != null && !techTileCode.isBlank()) {
-            techTileService.acquireTileForBuilding(
+            log.info("[UPGRADE_CORE] acquireTile: tile={}, track={}, mineHex=({},{}), lpHex=({},{})",
+                    techTileCode, techTrackCode, mineHexQ, mineHexR, lostPlanetHexQ, lostPlanetHexR);
+            tileResult = techTileService.acquireTileForBuilding(
                     gameId, playerId,
                     techTileCode, techTrackCode,
                     game.getEconomyTrackOption(), coveredTileCode);
@@ -690,22 +341,46 @@ public class BuildingService {
         // 액션 저장 (턴 진행은 리치 해소 후)
         actionService.saveActionOnly(gameId, playerId, actionType, actionData);
 
-        // BASIC_EXP_TILE_3 (2삽 1광): 후속 광산 배치 대기 (턴 넘기지 않음)
-        boolean hasDeferredMine = techTileCode != null && techTileCode.equals("BASIC_EXP_TILE_3");
+        // 2삽 광산 인라인 배치 (좌표가 제공된 경우 DEFERRED 없이 즉시 처리)
+        if (tileResult != null && tileResult.needsMine() && mineHexQ != null && mineHexR != null) {
+            PlaceMinePlayResponse mineResult = placeMineInPlayInternal(game, playerId, mineHexQ, mineHexR,
+                    mineQicUsed != null ? mineQicUsed : 0, false, 2, true);
+            if (!mineResult.success()) {
+                log.warn("[UPGRADE_MINE_INLINE] 2삽 광산 배치 실패: {}", mineResult.message());
+            }
+        }
+
+        // 후속 액션 판단 (기술타일 획득 결과 기반)
+        String followUpType = null;
+        String followUpData = null;
+
+        // 2삽 광산: 좌표 제공 → MINE_LEECH로 리치 체인, 미제공 → DEFERRED
+        boolean mineHandledInline = tileResult != null && tileResult.needsMine() && mineHexQ != null && mineHexR != null;
+
+        if (mineHandledInline && lostPlanetHexQ != null && lostPlanetHexR != null) {
+            // 2삽 광산 + 검은행성 모두 인라인: 업그레이드 리치 → 광산 리치 → 검은행성 리치
+            followUpType = "MINE_LEECH";
+            followUpData = String.format("{\"hexQ\":%d,\"hexR\":%d,\"playerId\":\"%s\",\"nextFollowUp\":\"LOST_PLANET_LEECH\",\"lpHexQ\":%d,\"lpHexR\":%d}",
+                    mineHexQ, mineHexR, playerId, lostPlanetHexQ, lostPlanetHexR);
+        } else if (mineHandledInline) {
+            // 2삽 광산만 인라인: 업그레이드 리치 → 광산 리치
+            followUpType = "MINE_LEECH";
+            followUpData = String.format("{\"hexQ\":%d,\"hexR\":%d,\"playerId\":\"%s\"}", mineHexQ, mineHexR, playerId);
+        } else if (lostPlanetHexQ != null && lostPlanetHexR != null) {
+            followUpType = "LOST_PLANET_LEECH";
+            followUpData = String.format("{\"hexQ\":%d,\"hexR\":%d,\"playerId\":\"%s\"}", lostPlanetHexQ, lostPlanetHexR, playerId);
+        } else if (tileResult != null && tileResult.needsMine()) {
+            // 2삽 좌표 미제공 → 기존 DEFERRED 폴백
+            followUpType = "PLACE_MINE_TERRAFORM_2";
+            followUpData = String.format("{\"terraformDiscount\":2,\"triggerPlayerId\":\"%s\"}", playerId);
+        } else if (tileResult != null && tileResult.needsLostPlanet()) {
+            followUpType = "PLACE_LOST_PLANET";
+            followUpData = String.format("{\"triggerPlayerId\":\"%s\"}", playerId);
+        }
 
         // 파워 리치 처리
         List<GameBuilding> allBuildings = gameBuildingRepository.findByGameId(gameId);
-        if (lostPlanetHexQ != null && lostPlanetHexR != null) {
-            // 검은행성이 있으면: 업그레이드 리치 → 해소 후 검은행성 리치로 연결
-            String lpFollowUp = String.format("{\"hexQ\":%d,\"hexR\":%d,\"playerId\":\"%s\"}", lostPlanetHexQ, lostPlanetHexR, playerId);
-            powerLeechService.createBatchAndProcess(game, playerId, building.getHexQ(), building.getHexR(), targetType, allBuildings, "LOST_PLANET_LEECH", lpFollowUp);
-        } else if (hasDeferredMine) {
-            // 2삽 1광: 리치 해소 후 광산 배치 대기
-            String deferredData = String.format("{\"terraformDiscount\":2,\"triggerPlayerId\":\"%s\"}", playerId);
-            powerLeechService.createBatchAndProcess(game, playerId, building.getHexQ(), building.getHexR(), targetType, allBuildings, "PLACE_MINE_TERRAFORM_2", deferredData);
-        } else {
-            powerLeechService.createBatchAndProcess(game, playerId, building.getHexQ(), building.getHexR(), targetType, allBuildings, null, null);
-        }
+        powerLeechService.createBatchAndProcess(game, playerId, building.getHexQ(), building.getHexR(), targetType, allBuildings, followUpType, followUpData);
 
         return null; // 성공
     }
@@ -790,17 +465,17 @@ public class BuildingService {
         return ps.getStockPlanetaryInstitute() == 0;
     }
 
-    /** 다카니안: 해당 섹터에 내 건물(가이아포머/우주정거장 제외)이 없으면 새 섹터 */
-    private boolean isNewSectorForPlayer(UUID gameId, UUID playerId, String sectorId) {
-        if (sectorId == null) return false;
-        List<GameHex> sectorHexes = gameHexRepository.findByGameIdAndSectorId(gameId, sectorId);
-        for (GameHex h : sectorHexes) {
-            if (gameBuildingRepository.existsByGameIdAndHexQAndHexR(gameId, h.getHexQ(), h.getHexR())) {
-                GameBuilding found = gameBuildingRepository.findFirstByGameIdAndHexQAndHexRAndIsLantidsMine(gameId, h.getHexQ(), h.getHexR(), false).orElse(null);
-                if (found != null && found.getPlayerId().equals(playerId)
-                        && found.getBuildingType() != BuildingType.GAIAFORMER
-                        && found.getBuildingType() != BuildingType.SPACE_STATION) return false;
-            }
+    /** 새 섹터 진출 여부: 해당 섹터에 내 건물(가이아포머/우주정거장/방금 놓은 건물 제외)이 없으면 true. 1헥스 섹터는 실제 섹터가 아니므로 항상 false. */
+    private boolean isNewSectorForPlayer(UUID gameId, UUID playerId, String sectorId, int newHexQ, int newHexR) {
+        if (!GameHex.isRealSector(sectorId)) return false;
+        List<GameBuilding> myBuildings = gameBuildingRepository.findByGameIdAndPlayerId(gameId, playerId);
+        for (GameBuilding b : myBuildings) {
+            if (b.getHexQ() == newHexQ && b.getHexR() == newHexR) continue; // 방금 놓은 건물 제외
+            if (b.getBuildingType() == BuildingType.GAIAFORMER) continue;
+            if (b.getBuildingType() == BuildingType.SPACE_STATION) continue;
+            if (b.isLantidsMine()) continue; // 기생 광산은 섹터 점유로 보지 않음
+            GameHex bHex = gameHexRepository.findByGameIdAndHexQAndHexR(gameId, b.getHexQ(), b.getHexR()).orElse(null);
+            if (bHex != null && sectorId.equals(bHex.getSectorId())) return false;
         }
         return true;
     }
@@ -822,7 +497,7 @@ public class BuildingService {
     /**
      * 해당 플레이어에게 처음 개척하는 행성 종류인지 확인 (ROUND_TILE_NEW_PLANET_TYPE 용)
      */
-    private boolean isNewPlanetTypeForPlayer(UUID gameId, UUID playerId, PlanetType newPlanetType) {
+    private boolean isNewPlanetTypeForPlayer(UUID gameId, UUID playerId, PlanetType newPlanetType, int newHexQ, int newHexR) {
         if (newPlanetType == null
                 || newPlanetType == PlanetType.EMPTY
                 || newPlanetType == PlanetType.TRANSDIM) {
@@ -830,6 +505,7 @@ public class BuildingService {
         }
         List<GameBuilding> existing = gameBuildingRepository.findByGameIdAndPlayerId(gameId, playerId);
         for (GameBuilding b : existing) {
+            if (b.getHexQ() == newHexQ && b.getHexR() == newHexR) continue; // 방금 놓은 건물 제외
             if (b.getBuildingType() == BuildingType.GAIAFORMER) continue;
             if (b.isLantidsMine()) continue; // 란티다 기생은 행성 종류에 포함하지 않음
             GameHex bHex = gameHexRepository.findByGameIdAndHexQAndHexR(gameId, b.getHexQ(), b.getHexR()).orElse(null);
@@ -838,12 +514,80 @@ public class BuildingService {
         return true;
     }
 
-    /** 덮이지 않은 특정 기술 타일 보유 여부 확인 */
-    private boolean hasActiveTechTile(UUID gameId, UUID playerId, String tileCode) {
-        return playerTechTileRepository
-                .findByGameIdAndPlayerIdAndIsCovered(gameId, playerId, false)
-                .stream()
-                .anyMatch(t -> tileCode.equals(t.getTechTileCode()));
+
+    /**
+     * 광산 건설 내부 로직 (리치/액션저장 제외 — upgradeCore 인라인용)
+     * placeMineInPlay를 PlaceMinePlayRequest로 래핑하여 호출하되, 리치는 호출자가 체인으로 처리
+     */
+    PlaceMinePlayResponse placeMineInPlayInternal(Game game, UUID playerId, int hexQ, int hexR,
+                                                   int qicUsed, boolean gaiaformerUsed, int terraformDiscount, boolean freeMine) {
+        PlaceMinePlayRequest req = new PlaceMinePlayRequest(playerId, hexQ, hexR, qicUsed, gaiaformerUsed, terraformDiscount, freeMine, false);
+
+        UUID gameId = game.getId();
+        GameHex hex = gameHexRepository.findByGameIdAndHexQAndHexR(gameId, hexQ, hexR).orElse(null);
+        if (hex == null) return PlaceMinePlayResponse.fail(gameId, "유효하지 않은 좌표입니다");
+
+        GameBuilding existingBuilding = gameBuildingRepository
+                .findFirstByGameIdAndHexQAndHexRAndIsLantidsMine(gameId, hexQ, hexR, false).orElse(null);
+        boolean isGaiaformerReturn = existingBuilding != null
+                && existingBuilding.getBuildingType() == BuildingType.GAIAFORMER
+                && existingBuilding.getPlayerId().equals(playerId)
+                && hex.getPlanetType() == PlanetType.GAIA;
+
+        GamePlayerState playerState = gamePlayerStateRepository.findByGameIdAndPlayerId(gameId, playerId)
+                .orElseThrow(() -> new IllegalStateException("플레이어 상태를 찾을 수 없습니다"));
+
+        // 비용 처리 (freeMine이므로 테라포밍 비용만)
+        if (freeMine && terraformDiscount > 0) {
+            int terraformingOre = calcTerraformingOre(playerState.getFactionType(), hex.getPlanetType(),
+                    playerState.getTechTerraforming(), terraformDiscount);
+            if (terraformingOre > 0) playerState.spendOre(terraformingOre);
+        }
+        if (qicUsed > 0) playerState.spendQic(qicUsed);
+
+        // 건물 배치
+        playerState.decreaseStockMine();
+        gamePlayerStateRepository.save(playerState);
+
+        GameBuilding mine = GameBuilding.place(gameId, playerId, hexQ, hexR, BuildingType.MINE);
+        gameBuildingRepository.save(mine);
+
+        // 라운드 점수
+        if (game.getCurrentRound() != null) {
+            roundScoringService.award(gameId, game.getCurrentRound(), playerState, RoundScoringEvent.MINE_PLACED, 1);
+            if (!isGaiaformerReturn && hex.getPlanetType() != PlanetType.GAIA && !gaiaformerUsed) {
+                int steps = calcRawTerraformingSteps(playerState.getFactionType(), hex.getPlanetType());
+                if (steps > 0) roundScoringService.award(gameId, game.getCurrentRound(), playerState, RoundScoringEvent.TERRAFORM_STEP, steps);
+            }
+            if (isNewSectorForPlayer(gameId, playerId, hex.getSectorId(), hexQ, hexR))
+                roundScoringService.award(gameId, game.getCurrentRound(), playerState, RoundScoringEvent.NEW_SECTOR_ENTERED, 1);
+            if (isNewPlanetTypeForPlayer(gameId, playerId, hex.getPlanetType(), hexQ, hexR))
+                roundScoringService.award(gameId, game.getCurrentRound(), playerState, RoundScoringEvent.NEW_PLANET_TYPE_COLONIZED, 1);
+        }
+
+        // 패시브 타일
+        if (gameCalculationService.hasActiveTechTile(gameId, playerId, "ADV_TILE_16")) {
+            playerState.addVP(3);
+            vpLogService.logVp(gameId, playerId, VpCategory.ADV_TECH_TILE, 3, null, "ADV_TILE_16 광산 건설 3VP");
+        }
+        if (gameCalculationService.hasActiveTechTile(gameId, playerId, "ADV_TILE_10")) {
+            int steps = calcRawTerraformingSteps(playerState.getFactionType(), hex.getPlanetType());
+            if (steps > 0) {
+                playerState.addVP(steps * 2);
+                vpLogService.logVp(gameId, playerId, VpCategory.ADV_TECH_TILE, steps * 2, null, "ADV_TILE_10 테라포밍 " + steps + "삽 × 2VP");
+            }
+        }
+        gamePlayerStateRepository.save(playerState);
+
+        // 연방 자동 편입
+        federationFormService.autoJoinFederation(gameId, playerId, hexQ, hexR);
+
+        // 액션 저장
+        actionService.saveActionOnly(gameId, playerId, ActionType.PLACE_MINE,
+                String.format("{\"hexQ\":%d,\"hexR\":%d,\"type\":\"INLINE_MINE\"}", hexQ, hexR));
+
+        log.info("[INLINE_MINE] 2삽 광산 인라인 배치: game={}, player={}, ({},{})", gameId, playerId, hexQ, hexR);
+        return PlaceMinePlayResponse.success(gameId, hexQ, hexR, 0);
     }
 
     /**
@@ -855,10 +599,10 @@ public class BuildingService {
      * - 해당 헥스의 planetType을 BLACK_PLANET으로 변경
      */
     @Transactional
-    public PlaceMinePlayResponse placeLostPlanet(UUID gameId, UUID playerId, int hexQ, int hexR) {
+    public PlaceMinePlayResponse placeLostPlanet(UUID gameId, UUID playerId, int hexQ, int hexR, int qicUsed) {
         Game game = gameRepository.findById(gameId)
                 .orElseThrow(() -> new IllegalArgumentException("게임을 찾을 수 없습니다"));
-        PlaceMinePlayResponse result = placeLostPlanetInternal(game, playerId, hexQ, hexR);
+        PlaceMinePlayResponse result = placeLostPlanetInternal(game, playerId, hexQ, hexR, qicUsed);
         if (!result.success()) return result;
 
         // 액션 저장 (턴 유지 — 리치 해소 후 턴 진행)
@@ -874,6 +618,10 @@ public class BuildingService {
 
     /** 검은행성 배치 핵심 로직 (리치/액션 저장 제외) */
     private PlaceMinePlayResponse placeLostPlanetInternal(Game game, UUID playerId, int hexQ, int hexR) {
+        return placeLostPlanetInternal(game, playerId, hexQ, hexR, 0);
+    }
+
+    private PlaceMinePlayResponse placeLostPlanetInternal(Game game, UUID playerId, int hexQ, int hexR, int qicUsed) {
         UUID gameId = game.getId();
 
         GamePlayerState ps = gamePlayerStateRepository.findByGameIdAndPlayerId(gameId, playerId)
@@ -900,6 +648,28 @@ public class BuildingService {
             return PlaceMinePlayResponse.fail(gameId, "연방 토큰 위에 검은행성을 배치할 수 없습니다");
         }
 
+        // 항법 거리 체크 (거리 5단계 도달 시점 → 기본 거리 4)
+        int navRange = switch (ps.getTechNavigation()) {
+            case 0 -> 1; case 1 -> 1; case 2 -> 2; case 3 -> 2; case 4 -> 3; default -> 4;
+        };
+        if (gameCalculationService.hasActiveTechTile(gameId, playerId, "BASIC_EXP_TILE_1")) {
+            navRange += 1;
+        }
+        int finalNavRange = navRange + qicUsed * 2;
+        List<GameBuilding> myBuildings = gameBuildingRepository.findByGameIdAndPlayerId(gameId, playerId);
+        boolean inRange = myBuildings.stream().anyMatch(b ->
+                hexDistance(b.getHexQ(), b.getHexR(), hexQ, hexR) <= finalNavRange);
+        if (!inRange) {
+            return PlaceMinePlayResponse.fail(gameId, "항법 거리 밖입니다 (현재 거리: " + finalNavRange + ")");
+        }
+        // QIC 소모
+        if (qicUsed > 0) {
+            if (ps.getQic() < qicUsed) {
+                return PlaceMinePlayResponse.fail(gameId, "QIC가 부족합니다");
+            }
+            ps.spendQic(qicUsed);
+        }
+
         // 헥스 planetType 변경 → BLACK_PLANET (검은행성)
         hex.setPlanetType(PlanetType.BLACK_PLANET);
         gameHexRepository.save(hex);
@@ -910,10 +680,38 @@ public class BuildingService {
 
         gamePlayerStateRepository.save(ps);
 
-        // 라운드 점수: 광산 건설 취급
+        // 기오덴 PI: 새 행성 타입 개척 시 +3 지식
+        if (ps.getFactionType() == FactionType.GEODENS
+                && hasPlanetaryInstitute(ps)
+                && isNewPlanetTypeForPlayer(gameId, playerId, PlanetType.BLACK_PLANET, hexQ, hexR)) {
+            ps.addKnowledge(3);
+            gamePlayerStateRepository.save(ps);
+            log.info("[GEODENS PI] 검은행성 새 행성 타입 지식 +3: player={}", playerId);
+        }
+
+        // 라운드 점수
         if (game.getCurrentRound() != null) {
             roundScoringService.award(gameId, game.getCurrentRound(), ps, RoundScoringEvent.MINE_PLACED, 1);
+            // 새 행성 종류
+            if (isNewPlanetTypeForPlayer(gameId, playerId, PlanetType.BLACK_PLANET, hexQ, hexR)) {
+                roundScoringService.award(gameId, game.getCurrentRound(), ps, RoundScoringEvent.NEW_PLANET_TYPE_COLONIZED, 1);
+            }
+            // 새 섹터 진출
+            if (hex.getSectorId() != null && isNewSectorForPlayer(gameId, playerId, hex.getSectorId(), hexQ, hexR)) {
+                roundScoringService.award(gameId, game.getCurrentRound(), ps, RoundScoringEvent.NEW_SECTOR_ENTERED, 1);
+            }
         }
+
+        // PASSIVE: ADV_TILE_16 - 광산 건설 시 3VP
+        if (gameCalculationService.hasActiveTechTile(gameId, playerId, "ADV_TILE_16")) {
+            ps.addVP(3);
+            vpLogService.logVp(gameId, playerId, VpCategory.ADV_TECH_TILE, 3, null, "ADV_TILE_16 검은행성 광산 3VP");
+        }
+
+        gamePlayerStateRepository.save(ps);
+
+        // 연방 자동 편입
+        federationFormService.autoJoinFederation(gameId, playerId, hexQ, hexR);
 
         log.info("[LOST_PLANET] 검은행성 배치: game={}, player={}, hex=({},{})", gameId, playerId, hexQ, hexR);
         return PlaceMinePlayResponse.success(gameId, hexQ, hexR, 0);

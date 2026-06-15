@@ -97,4 +97,13 @@ public class GameHex {
         hex.positionNo = positionNo;
         return hex;
     }
+
+    /**
+     * 1헥스 섹터 (FORGOTTEN_FLEET_*, SINGLE_*) 는 실제 섹터가 아니라 독립된 땅.
+     * 다카니안 PI, NEW_SECTOR_ENTERED 라운드 점수, 고급 타일 섹터 카운트 등에서 제외된다.
+     */
+    public static boolean isRealSector(String sectorId) {
+        if (sectorId == null) return false;
+        return sectorId.startsWith("SECTOR_") || sectorId.startsWith("DEEP_SECTOR_");
+    }
 }

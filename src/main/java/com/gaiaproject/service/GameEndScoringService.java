@@ -40,6 +40,7 @@ public class GameEndScoringService {
     private final com.gaiaproject.repository.player.GamePlayerFederationTokenRepository playerFederationTokenRepository;
     private final com.gaiaproject.repository.federation.GameFederationTokenHexRepository federationTokenHexRepository;
     private final com.gaiaproject.repository.player.GamePlayerArtifactRepository playerArtifactRepository;
+    private final GameCalculationService gameCalculationService;
 
     /**
      * 게임 종료 시 최종 점수 계산 (최종 미션 + 남은 자원 + 지식트랙)
@@ -68,7 +69,7 @@ public class GameEndScoringService {
 
         // 3. 남은 자원 점수 (3자원당 1VP, 3구역 파워=1돈 취급)
         for (GamePlayerState ps : allPlayers) {
-            int resourceVp = calcRemainingResourceVP(ps);
+            int resourceVp = calcRemainingResourceVP(ps, allBuildings);
             if (resourceVp > 0) {
                 ps.addVP(resourceVp);
                 vpLogService.logVp(gameId, ps.getPlayerId(), VpCategory.REMAINING_RESOURCES, resourceVp, null, "남은 자원 VP");
@@ -104,7 +105,7 @@ public class GameEndScoringService {
             // 각 플레이어 달성도 계산
             List<PlayerScore> scores = new ArrayList<>();
             for (GamePlayerState ps : allPlayers) {
-                int progress = calcFinalProgress(gameId, tileCode, ps.getPlayerId(), allBuildings, hexByCoord);
+                int progress = gameCalculationService.calcFinalProgress(gameId, tileCode, ps.getPlayerId(), allBuildings, hexByCoord);
                 scores.add(new PlayerScore(ps.getPlayerId(), progress));
             }
 
@@ -155,89 +156,19 @@ public class GameEndScoringService {
         return vp;
     }
 
-    /** 남은 자원 VP: 3자원당 1VP (3구역 파워=1돈 취급) */
-    private int calcRemainingResourceVP(GamePlayerState ps) {
-        int brainstoneValue = (ps.getBrainstoneBowl() != null && ps.getBrainstoneBowl() == 3) ? 1 : 0;
-        int totalResources = ps.getCredit() + ps.getOre() + ps.getKnowledge() + ps.getQic() + ps.getPowerBowl3() + brainstoneValue;
+    /** 남은 자원 VP: 3자원당 1VP (3구역 파워=1돈 취급, 네블라 의회 보유 시 3구역 파워=2돈) */
+    private int calcRemainingResourceVP(GamePlayerState ps, List<GameBuilding> allBuildings) {
+        // 네블라 의회 보유 여부: 3구역 파워/브레인스톤을 2배로 계산
+        boolean nevlasPi = ps.getFactionType() == com.gaiaproject.domain.enumtype.player.FactionType.NEVLAS
+                && allBuildings.stream().anyMatch(b -> b.getPlayerId().equals(ps.getPlayerId())
+                        && b.getBuildingType() == BuildingType.PLANETARY_INSTITUTE);
+        int powerMultiplier = nevlasPi ? 2 : 1;
+        int brainstoneValue = (ps.getBrainstoneBowl() != null && ps.getBrainstoneBowl() == 3) ? 1 * powerMultiplier : 0;
+        int totalResources = ps.getCredit() + ps.getOre() + ps.getKnowledge() + ps.getQic()
+                + ps.getPowerBowl3() * powerMultiplier + brainstoneValue;
         return totalResources / 3;
     }
 
-    /** 최종 미션 달성도 계산 (ScoringController에서 복사) */
-    private int calcFinalProgress(UUID gameId, String tileCode, UUID playerId,
-                                   List<GameBuilding> allBuildings, Map<String, GameHex> hexByCoord) {
-        List<GameBuilding> myBuildings = allBuildings.stream()
-                .filter(b -> b.getPlayerId().equals(playerId))
-                .filter(b -> b.getBuildingType() != BuildingType.GAIAFORMER)
-                .toList();
-
-        return switch (tileCode) {
-            case "FINAL_TILE_ASTEROID" -> (int) myBuildings.stream()
-                    .filter(b -> {
-                        GameHex hex = hexByCoord.get(b.getHexQ() + "," + b.getHexR());
-                        return hex != null && hex.getPlanetType() == PlanetType.ASTEROIDS;
-                    }).count();
-            case "FINAL_TILE_GAIA_PLANET" -> (int) myBuildings.stream()
-                    .filter(b -> {
-                        GameHex hex = hexByCoord.get(b.getHexQ() + "," + b.getHexR());
-                        return hex != null && hex.getPlanetType() == PlanetType.GAIA;
-                    }).count();
-            case "FINAL_TILE_MOST_BUILDINGS" -> {
-                int count = myBuildings.size();
-                // 인공물 가상 건물 +1
-                if (playerArtifactRepository.existsByGameIdAndPlayerIdAndArtifactType(gameId, playerId, "ARTIFACT_7")) count++;
-                if (playerArtifactRepository.existsByGameIdAndPlayerIdAndArtifactType(gameId, playerId, "ARTIFACT_8")) count++;
-                yield count;
-            }
-            case "FINAL_TILE_FEDERATION_BUILDINGS" -> {
-                var groups = federationGroupRepository.findByGameIdAndPlayerId(gameId, playerId);
-                if (groups.isEmpty()) yield 0;
-                var groupIds = groups.stream().map(g -> g.getId()).toList();
-                yield federationBuildingRepository.findByFederationGroupIdIn(groupIds).size();
-            }
-            case "FINAL_TILE_DEEP_SECTORS" -> (int) myBuildings.stream()
-                    .filter(b -> {
-                        GameHex hex = hexByCoord.get(b.getHexQ() + "," + b.getHexR());
-                        return hex != null && hex.getPlanetType() == PlanetType.LOST_PLANET;
-                    }).count();
-            case "FINAL_TILE_PLANET_TYPES" -> {
-                Set<PlanetType> types = myBuildings.stream()
-                        .filter(b -> !b.isLantidsMine())
-                        .map(b -> hexByCoord.get(b.getHexQ() + "," + b.getHexR()))
-                        .filter(Objects::nonNull)
-                        .map(GameHex::getPlanetType)
-                        .filter(p -> p != PlanetType.EMPTY && p != PlanetType.TRANSDIM)
-                        .collect(Collectors.toSet());
-                // 인공물 가상 행성 종류
-                if (playerArtifactRepository.existsByGameIdAndPlayerIdAndArtifactType(gameId, playerId, "ARTIFACT_7")) types.add(PlanetType.ASTEROIDS);
-                if (playerArtifactRepository.existsByGameIdAndPlayerIdAndArtifactType(gameId, playerId, "ARTIFACT_8")) types.add(PlanetType.LOST_PLANET);
-                yield types.size();
-            }
-            case "FINAL_TILE_FEDERATION_POWER" -> {
-                var fedGroups = federationGroupRepository.findByGameIdAndPlayerId(gameId, playerId);
-                int satCount = 0;
-                for (var g : fedGroups) satCount += federationTokenHexRepository.findByFederationGroupId(g.getId()).size();
-                yield satCount;
-            }
-            case "FINAL_TILE_PI_ACADEMY_DISTANCE" -> {
-                GameBuilding pi = myBuildings.stream()
-                        .filter(b -> b.getBuildingType() == BuildingType.PLANETARY_INSTITUTE).findFirst().orElse(null);
-                GameBuilding academy = myBuildings.stream()
-                        .filter(b -> b.getBuildingType() == BuildingType.ACADEMY).findFirst().orElse(null);
-                if (pi == null || academy == null) yield 0;
-                else yield com.gaiaproject.util.HexUtil.distance(pi.getHexQ(), pi.getHexR(), academy.getHexQ(), academy.getHexR());
-            }
-            case "FINAL_TILE_SECTORS_WITH_BUILDINGS" -> {
-                Set<String> sectors = myBuildings.stream()
-                        .map(b -> hexByCoord.get(b.getHexQ() + "," + b.getHexR()))
-                        .filter(Objects::nonNull)
-                        .map(GameHex::getSectorId)
-                        .filter(s -> s != null && s.startsWith("SECTOR_"))
-                        .collect(Collectors.toSet());
-                yield sectors.size();
-            }
-            default -> 0;
-        };
-    }
 
     private record PlayerScore(UUID playerId, int score) {}
 }

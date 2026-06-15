@@ -3,6 +3,7 @@ package com.gaiaproject.domain.entity.player;
 import com.gaiaproject.domain.enumtype.player.FactionType;
 import com.gaiaproject.dto.ResourcesVo;
 import com.gaiaproject.dto.TechTracksVo;
+import com.gaiaproject.dto.request.PlayerStateSnapshot;
 import jakarta.persistence.*;
 import lombok.AccessLevel;
 import lombok.Getter;
@@ -20,6 +21,18 @@ import java.util.UUID;
 @Table(name = "game_player_state")
 public class GamePlayerState {
 
+    // 자원/재고/트랙 상한 — 검증과 addXxx() 가 공유
+    public static final int MAX_CREDIT = 30;
+    public static final int MAX_ORE = 15;
+    public static final int MAX_KNOWLEDGE = 15;
+    public static final int MAX_STOCK_MINE = 8;
+    public static final int MAX_STOCK_TRADING_STATION = 4;
+    public static final int MAX_STOCK_RESEARCH_LAB = 3;
+    public static final int MAX_STOCK_PLANETARY_INSTITUTE = 1;
+    public static final int MAX_STOCK_ACADEMY = 2;
+    public static final int MAX_STOCK_GAIAFORMER = 3;
+    public static final int MAX_TECH_TRACK_LEVEL = 5;
+
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
@@ -29,6 +42,10 @@ public class GamePlayerState {
 
     @Column(name = "player_id", nullable = false)
     private UUID playerId;
+
+    // 디버깅용 비정규화 닉네임 — DB 트리거가 INSERT 시 자동 채움 (JPA는 읽기만)
+    @Column(name = "nickname", length = 50, insertable = false, updatable = false)
+    private String nickname;
 
     @Column(name = "seat_no", nullable = false)
     private Integer seatNo;
@@ -189,15 +206,15 @@ public class GamePlayerState {
 
     // 자원 추가 메서드 (최대치 제한: 돈 30, 광석 15, 지식 15, QIC 무제한)
     public void addOre(int amount) {
-        this.ore = Math.min(15, this.ore + amount);
+        this.ore = Math.min(MAX_ORE, this.ore + amount);
     }
 
     public void addCredit(int amount) {
-        this.credit = Math.min(30, this.credit + amount);
+        this.credit = Math.min(MAX_CREDIT, this.credit + amount);
     }
 
     public void addKnowledge(int amount) {
-        this.knowledge = Math.min(15, this.knowledge + amount);
+        this.knowledge = Math.min(MAX_KNOWLEDGE, this.knowledge + amount);
     }
 
     /** 글린 전용: QIC 아카데미 건설 여부 (DB 영속) */
@@ -209,28 +226,78 @@ public class GamePlayerState {
     public void addQic(int amount) {
         // 글린: QIC 아카데미 건설 전까지 모든 QIC → ORE 자동 변환
         if (factionType == com.gaiaproject.domain.enumtype.player.FactionType.GLEENS && !gleensHasQicAcademy) {
-            this.ore = Math.min(15, this.ore + amount);
+            this.ore = Math.min(MAX_ORE, this.ore + amount);
             return;
         }
         this.qic += amount;
     }
 
-    public void chargePower(int amount) {
-        // 파워 차징 로직 (Bowl I → II → III, 방금 이동한 토큰도 같은 순환에서 사용 가능)
+    /**
+     * 파워 차징 로직 (Bowl I → II → III, 방금 이동한 토큰도 같은 순환에서 사용 가능)
+     * @return 실제로 이동한 토큰 수 (effective charges)
+     */
+    public int chargePower(int amount) {
         int remaining = amount;
+        int moved = 0;
 
         // Bowl I → Bowl II
         int fromBowl1 = Math.min(powerBowl1, remaining);
         powerBowl1 -= fromBowl1;
         powerBowl2 += fromBowl1;
         remaining -= fromBowl1;
+        moved += fromBowl1;
 
         // Bowl II → Bowl III (방금 bowl1에서 올라온 토큰 포함)
         if (remaining > 0) {
             int fromBowl2 = Math.min(powerBowl2, remaining);
             powerBowl2 -= fromBowl2;
             powerBowl3 += fromBowl2;
+            moved += fromBowl2;
         }
+        return moved;
+    }
+
+    /**
+     * C안 commit-turn: FE가 계산한 최종 상태를 DB에 덮어쓰기.
+     * 스냅샷 DTO의 non-null 필드만 적용, null 필드는 기존 값 유지.
+     * 규칙 검증 없음 — FE가 이미 계산한 결과를 신뢰.
+     */
+    public void applySnapshot(PlayerStateSnapshot s) {
+        if (s == null) return;
+        if (s.credit() != null)                     this.credit = s.credit();
+        if (s.ore() != null)                        this.ore = s.ore();
+        if (s.knowledge() != null)                  this.knowledge = s.knowledge();
+        if (s.qic() != null)                        this.qic = s.qic();
+        if (s.powerBowl1() != null)                 this.powerBowl1 = s.powerBowl1();
+        if (s.powerBowl2() != null)                 this.powerBowl2 = s.powerBowl2();
+        if (s.powerBowl3() != null)                 this.powerBowl3 = s.powerBowl3();
+        // 브레인스톤은 null 도 의미있는 값 (타클론 연방토큰 소모 시 brainstone 제거) → 항상 적용
+        this.brainstoneBowl = s.brainstoneBowl();
+        if (s.gaiaPower() != null)                  this.gaiaPower = s.gaiaPower();
+        if (s.victoryPoints() != null)              this.victoryPoints = s.victoryPoints();
+        if (s.techTerraforming() != null)           this.techTerraforming = s.techTerraforming();
+        if (s.techNavigation() != null)             this.techNavigation = s.techNavigation();
+        if (s.techAi() != null)                     this.techAi = s.techAi();
+        if (s.techGaia() != null)                   this.techGaia = s.techGaia();
+        if (s.techEconomy() != null)                this.techEconomy = s.techEconomy();
+        if (s.techScience() != null)                this.techScience = s.techScience();
+        if (s.stockMine() != null)                  this.stockMine = s.stockMine();
+        if (s.stockTradingStation() != null)        this.stockTradingStation = s.stockTradingStation();
+        if (s.stockResearchLab() != null)           this.stockResearchLab = s.stockResearchLab();
+        if (s.stockPlanetaryInstitute() != null)    this.stockPlanetaryInstitute = s.stockPlanetaryInstitute();
+        if (s.stockAcademy() != null)               this.stockAcademy = s.stockAcademy();
+        if (s.stockGaiaformer() != null)            this.stockGaiaformer = s.stockGaiaformer();
+        if (s.boosterActionUsed() != null)          this.boosterActionUsed = s.boosterActionUsed();
+        if (s.factionAbilityUsed() != null)         this.factionAbilityUsed = s.factionAbilityUsed();
+        if (s.qicAcademyActionUsed() != null)       this.qicAcademyActionUsed = s.qicAcademyActionUsed();
+        if (s.gleensHasQicAcademy() != null)        this.gleensHasQicAcademy = s.gleensHasQicAcademy();
+        if (s.baltaksConvertedGaiaformers() != null) this.baltaksConvertedGaiaformers = s.baltaksConvertedGaiaformers();
+        if (s.permanentlyRemovedGaiaformers() != null) this.permanentlyRemovedGaiaformers = s.permanentlyRemovedGaiaformers();
+        if (s.federationCount() != null)            this.federationCount = s.federationCount();
+        if (s.tinkeroidsUsedActions() != null)      this.tinkeroidsUsedActions = s.tinkeroidsUsedActions();
+        // 팅커 현재 액션은 사용 후 null 로 리셋되므로 null 도 의미있는 값 → 항상 적용
+        this.tinkeroidsCurrentAction = s.tinkeroidsCurrentAction();
+        this.updatedAt = LocalDateTime.now();
     }
 
     public void gainPower(int amount) {
@@ -561,41 +628,55 @@ public class GamePlayerState {
     }
 
     /** 타클론 전용: 브레인스톤 우선 충전 */
-    public void chargePowerTaklons(int amount) {
+    /**
+     * 타클론 전용: 브레인스톤 우선 충전
+     * 방금 bowl1에서 bowl2로 올라온 토큰도 같은 차징 사이클에서 bowl3로 이동 가능 (chargePower와 동일 규칙).
+     * @return 실제로 이동한 토큰 수 (effective charges, 브레인스톤 이동 포함)
+     */
+    public int chargePowerTaklons(int amount) {
         int remaining = amount;
-        int originalBowl2 = powerBowl2;
+        int moved = 0;
 
         // 브레인스톤이 bowl1에 있으면 우선 충전
         if (brainstoneBowl != null && brainstoneBowl == 1 && remaining > 0) {
             brainstoneBowl = 2;
             remaining--;
+            moved++;
         }
 
         int fromBowl1 = Math.min(powerBowl1, remaining);
         powerBowl1 -= fromBowl1;
         powerBowl2 += fromBowl1;
         remaining -= fromBowl1;
+        moved += fromBowl1;
 
         // 브레인스톤이 bowl2에 있으면 우선 충전
         if (remaining > 0 && brainstoneBowl != null && brainstoneBowl == 2) {
             brainstoneBowl = 3;
             remaining--;
+            moved++;
         }
 
+        // 일반 토큰 bowl2 → bowl3 (방금 bowl1에서 올라온 토큰 포함)
         if (remaining > 0) {
-            int fromBowl2 = Math.min(originalBowl2, remaining);
+            int fromBowl2 = Math.min(powerBowl2, remaining);
             powerBowl2 -= fromBowl2;
             powerBowl3 += fromBowl2;
+            moved += fromBowl2;
         }
         this.updatedAt = java.time.LocalDateTime.now();
+        return moved;
     }
 
-    /** 종족 규칙을 반영한 파워 충전 (TAKLONS 전용 규칙 적용, 아이타는 차징은 일반과 동일 - 소각만 다름) */
-    public void chargePowerWithFactionRules(int amount) {
+    /**
+     * 종족 규칙을 반영한 파워 충전 (TAKLONS 전용 규칙 적용, 아이타는 차징은 일반과 동일 - 소각만 다름)
+     * @return 실제로 이동한 토큰 수 (effective charges)
+     */
+    public int chargePowerWithFactionRules(int amount) {
         if (factionType == com.gaiaproject.domain.enumtype.player.FactionType.TAKLONS) {
-            chargePowerTaklons(amount);
+            return chargePowerTaklons(amount);
         } else {
-            chargePower(amount);
+            return chargePower(amount);
         }
     }
 

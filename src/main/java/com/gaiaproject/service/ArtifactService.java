@@ -41,6 +41,7 @@ public class ArtifactService {
     private final GameRepository gameRepository;
     private final RoundScoringService roundScoringService;
     private final VpLogService vpLogService;
+    private final GameCalculationService gameCalculationService;
 
     /**
      * 인공물 초기 셋팅 (게임 시작 시 랜덤 4개)
@@ -191,6 +192,11 @@ public class ArtifactService {
                             && ps.getStockPlanetaryInstitute() == 0) {
                         ps.addKnowledge(3);
                         log.info("[ARTIFACT] 기오덴 PI 새 행성 유형 +3k");
+                    }
+                    // PASSIVE: ADV_TILE_16 - 광산 건설 시 +3VP (인공물 광산도 광산 건설로 취급)
+                    if (gameCalculationService.hasActiveTechTile(gameId, ps.getPlayerId(), "ADV_TILE_16")) {
+                        ps.addVP(3);
+                        vpLogService.logVp(gameId, ps.getPlayerId(), VpCategory.ADV_TECH_TILE, 3, null, "ADV_TILE_16 인공물 광산 3VP");
                     }
                 }
                 log.info("[ARTIFACT] {} 행성 유형 추가", special);

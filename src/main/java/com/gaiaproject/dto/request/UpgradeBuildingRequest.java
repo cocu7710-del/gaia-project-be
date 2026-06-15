@@ -12,5 +12,8 @@ public record UpgradeBuildingRequest(
         String academyType,         // (선택) "KNOWLEDGE" 또는 "QIC" — 아카데미 건설 시 필수
         String coveredTileCode,     // (선택) 고급 타일 획득 시 덮을 기본 타일 코드
         Integer lostPlanetHexQ,     // (선택) 거리 5단계 진입 시 검은행성 배치 좌표
-        Integer lostPlanetHexR      // (선택) 거리 5단계 진입 시 검은행성 배치 좌표
+        Integer lostPlanetHexR,     // (선택) 거리 5단계 진입 시 검은행성 배치 좌표
+        Integer mineHexQ,           // (선택) 2삽 기술타일(BASIC_EXP_TILE_3) 광산 배치 좌표
+        Integer mineHexR,           // (선택) 2삽 기술타일(BASIC_EXP_TILE_3) 광산 배치 좌표
+        Integer mineQicUsed         // (선택) 2삽 광산 배치 시 QIC 사용량
 ) {}

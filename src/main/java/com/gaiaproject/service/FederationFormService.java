@@ -78,7 +78,8 @@ public class FederationFormService {
             String key = hex[0] + "," + hex[1];
             GameBuilding b = myBuildingMap.get(key);
             if (b == null) return Map.of("success", false, "message", "내 건물이 아닙니다: (" + hex[0] + "," + hex[1] + ")");
-            totalPower += buildingPowerValue(b.getBuildingType(), gameId, playerId, b.isHasRing());
+            // 란티다 기생 광산은 항상 광산 파워(1)로 취급
+            totalPower += b.isLantidsMine() ? 1 : buildingPowerValue(b.getBuildingType(), gameId, playerId, b.isHasRing());
         }
         // 매안 PI: 본인 행성(TITANIUM) 건물 파워값 +1
         if (ps.getFactionType() == FactionType.BESCODS && ps.getStockPlanetaryInstitute() == 0) {
@@ -494,7 +495,7 @@ public class FederationFormService {
         }
 
         // 파워 값 (BASIC_TILE_9 반영)
-        int totalPowerValue = selectedBuildings.stream().mapToInt(b -> buildingPowerValue(b.getBuildingType(), gameId, playerId, b.isHasRing())).sum();
+        int totalPowerValue = selectedBuildings.stream().mapToInt(b -> b.isLantidsMine() ? 1 : buildingPowerValue(b.getBuildingType(), gameId, playerId, b.isHasRing())).sum();
         // 매안 PI: 본인 행성(TITANIUM) 건물 파워값 +1
         if (ps.getFactionType() == FactionType.BESCODS && ps.getStockPlanetaryInstitute() == 0) {
             for (GameBuilding b : selectedBuildings) {
@@ -510,20 +511,26 @@ public class FederationFormService {
         int fedRequiredPower = isXenosPi ? 6 : 7;
 
         if (isIvits) {
-            // 하이브: 기존 연방 파워 합산 + 7의 배수 체크
+            // 하이브: 기존 연방 파워 합산 + fedCount 기반 목표 체크
             List<GameFederationGroup> existingGroups = federationGroupRepository.findByGameIdAndPlayerId(gameId, playerId);
             int existingPowerValue = 0;
+            // 새로 선택한 건물 좌표 (중복 카운트 방지)
+            Set<String> newBuildingSet = new HashSet<>();
+            for (int[] h : buildingHexes) newBuildingSet.add(h[0] + "," + h[1]);
             if (!existingGroups.isEmpty()) {
                 GameFederationGroup eg = existingGroups.get(0);
                 for (GameFederationBuilding fb : federationBuildingRepository.findByFederationGroupId(eg.getId())) {
+                    String key = fb.getHexQ() + "," + fb.getHexR();
+                    if (newBuildingSet.contains(key)) continue; // 새 선택과 겹치면 제외 (이중 카운트 방지)
                     GameBuilding b = buildingRepository.findFirstByGameIdAndHexQAndHexRAndIsLantidsMine(gameId, fb.getHexQ(), fb.getHexR(), false).orElse(null);
                     if (b != null) existingPowerValue += buildingPowerValue(b.getBuildingType(), gameId, playerId, b.isHasRing());
                 }
             }
             int total = existingPowerValue + totalPowerValue;
-            int prevTiles = existingPowerValue / 7;
-            if (total / 7 <= prevTiles) {
-                return FormFederationResponse.fail(gameId, "연방 파워가 부족합니다 (현재: " + total + ", 다음 목표: " + (prevTiles + 1) * 7 + ")");
+            int fedCount = ps.getFederationCount();
+            int requiredPower = (fedCount + 1) * 7;
+            if (total < requiredPower) {
+                return FormFederationResponse.fail(gameId, "연방 파워가 부족합니다 (현재: " + total + ", 다음 목표: " + requiredPower + ")");
             }
         } else {
             if (totalPowerValue < fedRequiredPower) {
@@ -638,7 +645,7 @@ public class FederationFormService {
         }
 
         // 5. 파워 값 합계 검증 (제노스 PI: 6 이상, 기본: 7 이상)
-        int totalPowerValue = selectedBuildings.stream().mapToInt(b -> buildingPowerValue(b.getBuildingType(), gameId, playerId, b.isHasRing())).sum();
+        int totalPowerValue = selectedBuildings.stream().mapToInt(b -> b.isLantidsMine() ? 1 : buildingPowerValue(b.getBuildingType(), gameId, playerId, b.isHasRing())).sum();
         // 매안 PI: 본인 행성(TITANIUM) 건물 파워값 +1
         if (ps.getFactionType() == FactionType.BESCODS && ps.getStockPlanetaryInstitute() == 0) {
             for (GameBuilding b : selectedBuildings) {
@@ -678,7 +685,13 @@ public class FederationFormService {
         for (int[] h : tokenHexes) federationTokenHexRepository.save(GameFederationTokenHex.builder().federationGroupId(group.getId()).hexQ(h[0]).hexR(h[1]).build());
 
         FederationTileService.acquireTileFromOffer(federationOfferRepository, gameId, tileType);
-        playerFederationTokenRepository.save(GamePlayerFederationToken.builder().gameId(gameId).playerId(playerId).federationTileType(tileType).build());
+        GamePlayerFederationToken playerToken = playerFederationTokenRepository.save(
+                GamePlayerFederationToken.builder().gameId(gameId).playerId(playerId).federationTileType(tileType).build());
+        // 비활성 연방토큰(useFederation=false)은 player_token도 즉시 used 처리
+        if (!tileType.isUseFederation()) {
+            playerToken.markUsed();
+            playerFederationTokenRepository.save(playerToken);
+        }
 
         ps.applyIncome(tileType.getImmediateReward());
         if (tileType.getImmediateReward().vp() > 0) {
@@ -754,7 +767,7 @@ public class FederationFormService {
         }
 
         // 신규 건물 파워값
-        int newPowerValue = selectedBuildings.stream().mapToInt(b -> buildingPowerValue(b.getBuildingType(), gameId, playerId, b.isHasRing())).sum();
+        int newPowerValue = selectedBuildings.stream().mapToInt(b -> b.isLantidsMine() ? 1 : buildingPowerValue(b.getBuildingType(), gameId, playerId, b.isHasRing())).sum();
 
         // 기존 연방 파워 합산
         int existingPowerValue = 0;
@@ -808,13 +821,37 @@ public class FederationFormService {
             }
         }
 
-        // 건물/토큰 추가
-        for (int[] h : buildingHexes) federationBuildingRepository.save(GameFederationBuilding.builder().federationGroupId(group.getId()).hexQ(h[0]).hexR(h[1]).build());
-        for (int[] h : tokenHexes) federationTokenHexRepository.save(GameFederationTokenHex.builder().federationGroupId(group.getId()).hexQ(h[0]).hexR(h[1]).build());
+        // 건물/토큰 추가 (기존 연방에 이미 있는 건물은 중복 저장하지 않음)
+        Set<String> existingBuildingKeys = new HashSet<>();
+        if (existingGroup != null) {
+            federationBuildingRepository.findByFederationGroupId(group.getId())
+                    .forEach(fb -> existingBuildingKeys.add(fb.getHexQ() + "," + fb.getHexR()));
+        }
+        for (int[] h : buildingHexes) {
+            if (!existingBuildingKeys.contains(h[0] + "," + h[1])) {
+                federationBuildingRepository.save(GameFederationBuilding.builder().federationGroupId(group.getId()).hexQ(h[0]).hexR(h[1]).build());
+            }
+        }
+        Set<String> existingTokenKeys = new HashSet<>();
+        if (existingGroup != null) {
+            federationTokenHexRepository.findByFederationGroupId(group.getId())
+                    .forEach(th -> existingTokenKeys.add(th.getHexQ() + "," + th.getHexR()));
+        }
+        for (int[] h : tokenHexes) {
+            if (!existingTokenKeys.contains(h[0] + "," + h[1])) {
+                federationTokenHexRepository.save(GameFederationTokenHex.builder().federationGroupId(group.getId()).hexQ(h[0]).hexR(h[1]).build());
+            }
+        }
 
         // 연방 타일 획득
         FederationTileService.acquireTileFromOffer(federationOfferRepository, gameId, tileType);
-        playerFederationTokenRepository.save(GamePlayerFederationToken.builder().gameId(gameId).playerId(playerId).federationTileType(tileType).build());
+        GamePlayerFederationToken playerToken = playerFederationTokenRepository.save(
+                GamePlayerFederationToken.builder().gameId(gameId).playerId(playerId).federationTileType(tileType).build());
+        // 비활성 연방토큰(useFederation=false)은 player_token도 즉시 used 처리
+        if (!tileType.isUseFederation()) {
+            playerToken.markUsed();
+            playerFederationTokenRepository.save(playerToken);
+        }
 
         ps.applyIncome(tileType.getImmediateReward());
         if (tileType.getImmediateReward().vp() > 0) {
@@ -916,8 +953,25 @@ public class FederationFormService {
         if (tokenHexes == null || tokenHexes.isEmpty()) return false;
         Set<String> buildingSet = new HashSet<>();
         for (int[] h : buildingHexes) buildingSet.add(h[0] + "," + h[1]);
+        // 하이브: 기존 연방 건물/토큰도 0-비용 연결 노드로 포함 (이미 QIC 지불된 곳)
+        List<int[]> effectiveBuildingHexes = buildingHexes;
+        if (isIvits) {
+            List<GameFederationGroup> existingGroups = federationGroupRepository.findByGameIdAndPlayerId(gameId, playerId);
+            if (!existingGroups.isEmpty()) {
+                UUID gid = existingGroups.get(0).getId();
+                for (GameFederationBuilding fb : federationBuildingRepository.findByFederationGroupId(gid)) {
+                    buildingSet.add(fb.getHexQ() + "," + fb.getHexR());
+                }
+                for (var ft : federationTokenHexRepository.findByFederationGroupId(gid)) {
+                    buildingSet.add(ft.getHexQ() + "," + ft.getHexR());
+                }
+                effectiveBuildingHexes = buildingSet.stream()
+                        .map(s -> { String[] p = s.split(","); return new int[]{Integer.parseInt(p[0]), Integer.parseInt(p[1])}; })
+                        .toList();
+            }
+        }
         Set<String> allowedHexes = buildAllowedHexes(gameId, playerId, isIvits);
-        int minTokens = calcMinTokensToConnect(buildingHexes, gameId, allowedHexes, buildingSet);
+        int minTokens = calcMinTokensToConnect(effectiveBuildingHexes, gameId, allowedHexes, buildingSet);
         return tokenHexes.size() > minTokens;
     }
 
@@ -966,10 +1020,17 @@ public class FederationFormService {
         // 1. 연방 그룹 기반 토큰
         List<GameFederationGroup> groups = federationGroupRepository.findByGameId(gameId);
         for (var g : groups) {
+            // 좌표 기준 중복 제거 (하이브: 같은 건물이 여러 번 추가될 수 있음)
             List<int[]> bHexes = federationBuildingRepository.findByFederationGroupId(g.getId())
-                    .stream().map(b -> new int[]{b.getHexQ(), b.getHexR()}).toList();
+                    .stream().map(b -> new int[]{b.getHexQ(), b.getHexR()})
+                    .collect(java.util.stream.Collectors.toMap(
+                            h -> h[0] + "," + h[1], h -> h, (a, b) -> a))
+                    .values().stream().toList();
             List<int[]> tHexes = federationTokenHexRepository.findByFederationGroupId(g.getId())
-                    .stream().map(t -> new int[]{t.getHexQ(), t.getHexR()}).toList();
+                    .stream().map(t -> new int[]{t.getHexQ(), t.getHexR()})
+                    .collect(java.util.stream.Collectors.toMap(
+                            h -> h[0] + "," + h[1], h -> h, (a, b) -> a))
+                    .values().stream().toList();
             result.add(new FederationGroupInfo(g.getPlayerId().toString(), g.getFederationTileCode(), bHexes, tHexes, g.isUsed()));
         }
 
@@ -1085,4 +1146,88 @@ public class FederationFormService {
     }
 
     public record FederationGroupInfo(String playerId, String tileCode, List<int[]> buildingHexes, List<int[]> tokenHexes, boolean used) {}
+
+    // ================================================================
+    // C안 commit-turn 지원: raw DB operation (검증 없음)
+    // ================================================================
+
+    /**
+     * 연방 그룹 raw 생성 — 검증 없음, FE가 계산한 결과 그대로 저장.
+     * - game_federation_group INSERT
+     * - game_federation_building rows INSERT
+     * - game_federation_token_hex rows INSERT
+     * - game_player_federation_token INSERT
+     * - FederationTileType.isUseFederation() == false 이면 즉시 used 처리
+     */
+    public void createGroupRaw(UUID gameId, UUID playerId, String tileCode,
+                               List<int[]> buildingHexes, List<int[]> tokenHexes) {
+        FederationTileType tileType;
+        try {
+            tileType = FederationTileType.valueOf(tileCode);
+        } catch (Exception e) {
+            log.warn("[COMMIT_TURN] 알 수 없는 연방 타일 코드: {}", tileCode);
+            return;
+        }
+
+        GameFederationGroup group = federationGroupRepository.save(GameFederationGroup.builder()
+                .gameId(gameId).playerId(playerId).federationTileCode(tileType.name()).build());
+        if (!tileType.isUseFederation()) {
+            group.markUsed();
+            federationGroupRepository.save(group);
+        }
+        if (buildingHexes != null) {
+            for (int[] h : buildingHexes) {
+                federationBuildingRepository.save(GameFederationBuilding.builder()
+                        .federationGroupId(group.getId()).hexQ(h[0]).hexR(h[1]).build());
+            }
+        }
+        if (tokenHexes != null) {
+            for (int[] h : tokenHexes) {
+                federationTokenHexRepository.save(GameFederationTokenHex.builder()
+                        .federationGroupId(group.getId()).hexQ(h[0]).hexR(h[1]).build());
+            }
+        }
+
+        // 오퍼에서 타일 차감
+        FederationTileService.acquireTileFromOffer(federationOfferRepository, gameId, tileType);
+
+        // 플레이어 토큰 기록 (비활성 연방토큰은 즉시 used 처리)
+        GamePlayerFederationToken pToken = playerFederationTokenRepository.save(GamePlayerFederationToken.builder()
+                .gameId(gameId).playerId(playerId).federationTileType(tileType).build());
+        if (!tileType.isUseFederation()) {
+            pToken.markUsed();
+            playerFederationTokenRepository.save(pToken);
+        }
+
+        log.info("[COMMIT_TURN] 연방 그룹 생성: game={}, player={}, tile={}, buildings={}, tokens={}",
+                gameId, playerId, tileType,
+                buildingHexes != null ? buildingHexes.size() : 0,
+                tokenHexes != null ? tokenHexes.size() : 0);
+    }
+
+    /**
+     * 연방 토큰 플립 (used 처리) — raw.
+     * game_federation_group 과 game_player_federation_token 양쪽 동기화.
+     */
+    public void flipTokenRaw(UUID gameId, UUID playerId, String tileCode) {
+        // 그룹 플립 (사용 안 된 것 중 하나)
+        List<GameFederationGroup> groups = federationGroupRepository.findByGameIdAndPlayerId(gameId, playerId);
+        for (GameFederationGroup g : groups) {
+            if (tileCode.equals(g.getFederationTileCode()) && !g.isUsed()) {
+                g.markUsed();
+                federationGroupRepository.save(g);
+                break;
+            }
+        }
+        // 플레이어 토큰 플립
+        var tokens = playerFederationTokenRepository.findByGameIdAndPlayerId(gameId, playerId);
+        for (var t : tokens) {
+            if (tileCode.equals(t.getFederationTileType().name()) && !t.isUsed()) {
+                t.markUsed();
+                playerFederationTokenRepository.save(t);
+                break;
+            }
+        }
+        log.info("[COMMIT_TURN] 연방 토큰 플립: game={}, player={}, tile={}", gameId, playerId, tileCode);
+    }
 }

@@ -10,6 +10,7 @@ import com.gaiaproject.domain.enumtype.player.PlanetType;
 import com.gaiaproject.dto.response.ScoringTilesResponse;
 import com.gaiaproject.dto.response.ScoringTilesResponse.FinalScoringInfo;
 import com.gaiaproject.dto.response.ScoringTilesResponse.RoundScoringInfo;
+import com.gaiaproject.service.GameCalculationService;
 import com.gaiaproject.repository.building.GameBuildingRepository;
 import com.gaiaproject.repository.game.GameSeatRepository;
 import com.gaiaproject.repository.map.GameHexRepository;
@@ -44,6 +45,8 @@ public class ScoringController {
     private final com.gaiaproject.repository.player.GamePlayerStateRepository playerStateRepository;
     private final com.gaiaproject.repository.player.GamePlayerFederationTokenRepository playerFederationTokenRepository;
     private final com.gaiaproject.repository.federation.GameFederationTokenHexRepository federationTokenHexRepository;
+    private final com.gaiaproject.repository.player.GamePlayerArtifactRepository playerArtifactRepository;
+    private final GameCalculationService gameCalculationService;
 
     @Operation(summary = "게임 결과 조회 (카테고리별 VP)")
     @GetMapping("/result")
@@ -115,7 +118,7 @@ public class ScoringController {
                 .map(fs -> {
                     Map<String, Integer> progress = new LinkedHashMap<>();
                     for (UUID pid : playerIds) {
-                        int count = calcFinalProgress(roomId, fs.getScoringTileCode().name(), pid, allBuildings, hexByCoord);
+                        int count = gameCalculationService.calcFinalProgress(roomId, fs.getScoringTileCode().name(), pid, allBuildings, hexByCoord);
                         progress.put(pid.toString(), count);
                     }
                     return new FinalScoringInfo(
@@ -128,82 +131,5 @@ public class ScoringController {
                 .toList();
 
         return ResponseEntity.ok(new ScoringTilesResponse(roundInfos, finalInfos));
-    }
-
-    private int calcFinalProgress(UUID gameId, String tileCode, UUID playerId,
-                                   List<GameBuilding> allBuildings, Map<String, GameHex> hexByCoord) {
-        List<GameBuilding> myBuildings = allBuildings.stream()
-                .filter(b -> b.getPlayerId().equals(playerId))
-                .filter(b -> b.getBuildingType() != BuildingType.GAIAFORMER)
-                .toList();
-
-        return switch (tileCode) {
-            case "FINAL_TILE_ASTEROID" -> (int) myBuildings.stream()
-                    .filter(b -> {
-                        GameHex hex = hexByCoord.get(b.getHexQ() + "," + b.getHexR());
-                        return hex != null && hex.getPlanetType() == PlanetType.ASTEROIDS;
-                    }).count();
-
-            case "FINAL_TILE_GAIA_PLANET" -> (int) myBuildings.stream()
-                    .filter(b -> {
-                        GameHex hex = hexByCoord.get(b.getHexQ() + "," + b.getHexR());
-                        return hex != null && hex.getPlanetType() == PlanetType.GAIA;
-                    }).count();
-
-            case "FINAL_TILE_MOST_BUILDINGS" -> myBuildings.size();
-
-            case "FINAL_TILE_FEDERATION_BUILDINGS" -> {
-                var groups = federationGroupRepository.findByGameIdAndPlayerId(gameId, playerId);
-                if (groups.isEmpty()) yield 0;
-                var groupIds = groups.stream().map(g -> g.getId()).toList();
-                yield (int) federationBuildingRepository.findByFederationGroupIdIn(groupIds).size();
-            }
-
-            case "FINAL_TILE_DEEP_SECTORS" -> (int) myBuildings.stream()
-                    .filter(b -> {
-                        GameHex hex = hexByCoord.get(b.getHexQ() + "," + b.getHexR());
-                        return hex != null && hex.getPlanetType() == PlanetType.LOST_PLANET;
-                    }).count();
-
-            case "FINAL_TILE_PLANET_TYPES" -> {
-                Set<PlanetType> types = myBuildings.stream()
-                        .filter(b -> !b.isLantidsMine()) // 란티다 기생 제외
-                        .map(b -> hexByCoord.get(b.getHexQ() + "," + b.getHexR()))
-                        .filter(Objects::nonNull)
-                        .map(GameHex::getPlanetType)
-                        .filter(p -> p != PlanetType.EMPTY && p != PlanetType.TRANSDIM)
-                        .collect(Collectors.toSet());
-                yield types.size();
-            }
-
-            case "FINAL_TILE_FEDERATION_POWER" -> {
-                // 연방 형성 시 사용한 파워 토큰(위성) 수
-                var groups = federationGroupRepository.findByGameIdAndPlayerId(gameId, playerId);
-                int tokenCount = 0;
-                for (var g : groups) tokenCount += federationTokenHexRepository.findByFederationGroupId(g.getId()).size();
-                yield tokenCount;
-            }
-
-            case "FINAL_TILE_PI_ACADEMY_DISTANCE" -> {
-                GameBuilding pi = myBuildings.stream()
-                        .filter(b -> b.getBuildingType() == BuildingType.PLANETARY_INSTITUTE).findFirst().orElse(null);
-                GameBuilding academy = myBuildings.stream()
-                        .filter(b -> b.getBuildingType() == BuildingType.ACADEMY).findFirst().orElse(null);
-                if (pi == null || academy == null) yield 0;
-                else yield com.gaiaproject.util.HexUtil.distance(pi.getHexQ(), pi.getHexR(), academy.getHexQ(), academy.getHexR());
-            }
-
-            case "FINAL_TILE_SECTORS_WITH_BUILDINGS" -> {
-                Set<String> sectors = myBuildings.stream()
-                        .map(b -> hexByCoord.get(b.getHexQ() + "," + b.getHexR()))
-                        .filter(Objects::nonNull)
-                        .map(GameHex::getSectorId)
-                        .filter(s -> s != null && s.startsWith("SECTOR_"))
-                        .collect(Collectors.toSet());
-                yield sectors.size();
-            }
-
-            default -> 0;
-        };
     }
 }

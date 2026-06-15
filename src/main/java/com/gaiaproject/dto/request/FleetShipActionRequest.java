@@ -13,5 +13,8 @@ public record FleetShipActionRequest(
         Integer qicUsed,        // 거리 확장에 사용한 QIC 수 (nullable)
         Boolean splitAction,    // true: 후속 광산 건설이 있어 턴을 넘기지 않음 (nullable)
         String federationTileCode, // TWILIGHT_FED: 재사용할 연방 토큰 코드 (nullable)
-        Boolean useBrainstone    // 타클론: 브레인스톤 사용 여부 (nullable)
+        Boolean useBrainstone,   // 타클론: 브레인스톤 사용 여부 (nullable)
+        Integer mineHexQ,        // TWILIGHT_UPGRADE + BASIC_EXP_TILE_3: 2삽 광산 좌표 (nullable)
+        Integer mineHexR,
+        Integer mineQicUsed      // 2삽 광산 배치 시 사용한 QIC
 ) {}

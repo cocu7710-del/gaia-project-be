@@ -111,6 +111,7 @@ public class Game {
     /**
      * 게임 생성 팩토리.
      * - status는 READY로 시작
+     * - 경제 트랙 옵션 / 공통 고급 타일 조건은 방 생성 시점에 결정 (비딩 전에 공개)
      */
     public static Game createRoom(String title, String roomCode) {
         Game g = new Game();
@@ -118,6 +119,8 @@ public class Game {
         g.title = title;
         g.roomCode = roomCode;
         g.maxPlayers = 4;
+        g.economyTrackOption = EconomyTrackOption.random();
+        g.commonAdvTileCondition = CommonAdvTileConditionType.random();
         g.createdAt = LocalDateTime.now();
         g.updatedAt = LocalDateTime.now();
         return g;
@@ -133,8 +136,9 @@ public class Game {
         this.status = "IN_PROGRESS";
         this.currentRound = 1;
         this.currentTurnSeatNo = 1;
-        this.economyTrackOption = EconomyTrackOption.random();
-        this.commonAdvTileCondition = CommonAdvTileConditionType.random();
+        // economyTrackOption / commonAdvTileCondition은 createRoom에서 이미 설정됨 (비딩 전 공개용)
+        if (this.economyTrackOption == null) this.economyTrackOption = EconomyTrackOption.random();
+        if (this.commonAdvTileCondition == null) this.commonAdvTileCondition = CommonAdvTileConditionType.random();
         this.updatedAt = LocalDateTime.now();
     }
 

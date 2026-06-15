@@ -32,7 +32,7 @@ public class VpLogService {
         log.debug("[VP_LOG] game={}, player={}, cat={}, amount={}, desc={}", gameId, playerId, category, amount, description);
     }
 
-    /** 세부 VP (라운드별 ROUND_SCORING/BOOSTER_PASS, 함대별 FLEET) */
+    /** 세부 VP (라운드별 / 함대별 / 고급타일별 / 최종미션별) */
     public Map<UUID, Map<String, Integer>> getDetailScores(UUID gameId) {
         List<GameVpLog> logs = vpLogRepository.findByGameId(gameId);
         Map<UUID, Map<String, Integer>> result = new LinkedHashMap<>();
@@ -41,13 +41,32 @@ public class VpLogService {
             if (log.getCategory() == VpCategory.ROUND_SCORING || log.getCategory() == VpCategory.BOOSTER_PASS) {
                 key = log.getCategory().name() + "_R" + (log.getRoundNumber() != null ? log.getRoundNumber() : 0);
             } else if (log.getCategory() == VpCategory.FLEET && log.getDescription() != null) {
-                // description에서 함대 이름 추출
                 String desc = log.getDescription();
                 if (desc.contains("ECLIPSE")) key = "FLEET_ECLIPSE";
                 else if (desc.contains("TWILIGHT")) key = "FLEET_TWILIGHT";
                 else if (desc.contains("TF_MARS")) key = "FLEET_TF_MARS";
                 else if (desc.contains("REBELLION")) key = "FLEET_REBELLION";
                 else key = "FLEET_OTHER";
+            } else if (log.getCategory() == VpCategory.ADV_TECH_TILE && log.getDescription() != null) {
+                // description 내 ADV_TILE_NN 패턴 추출
+                var m = java.util.regex.Pattern.compile("ADV_TILE_\\d+").matcher(log.getDescription());
+                if (m.find()) key = "ADV_TECH_TILE_" + m.group();
+                else key = "ADV_TECH_TILE_OTHER";
+            } else if (log.getCategory() == VpCategory.FINAL_SCORING && log.getDescription() != null) {
+                // description 예시: "최종 미션: FINAL_STRUCTURES (5개)" — FINAL_XXX 추출
+                var m = java.util.regex.Pattern.compile("FINAL_[A-Z_]+").matcher(log.getDescription());
+                if (m.find()) key = "FINAL_SCORING_" + m.group();
+                else key = "FINAL_SCORING_OTHER";
+            } else if (log.getCategory() == VpCategory.TECH_TILE && log.getDescription() != null) {
+                // 일반 기술타일: BASIC_TILE_N 추출
+                var m = java.util.regex.Pattern.compile("BASIC(?:_EXP)?_TILE_\\d+").matcher(log.getDescription());
+                if (m.find()) key = "TECH_TILE_" + m.group();
+                else if (log.getDescription().contains("가이아 5단계")) key = "TECH_TILE_GAIA_5";
+                else key = "TECH_TILE_OTHER";
+            } else if (log.getCategory() == VpCategory.FEDERATION_TOKEN && log.getDescription() != null) {
+                var m = java.util.regex.Pattern.compile("FED(?:_EXP)?_TILE_\\d+|GLEENS_FEDERATION").matcher(log.getDescription());
+                if (m.find()) key = "FEDERATION_TOKEN_" + m.group();
+                else key = "FEDERATION_TOKEN_OTHER";
             }
             if (key != null) {
                 result.computeIfAbsent(log.getPlayerId(), k -> new LinkedHashMap<>())

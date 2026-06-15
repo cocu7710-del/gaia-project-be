@@ -53,6 +53,10 @@ public class GameSeat {
     @Column(name = "player_id")
     private UUID playerId;
 
+    /** 디버깅용 비정규화 닉네임 — DB 트리거가 claim(UPDATE player_id) 시 자동 채움 */
+    @Column(name = "nickname", length = 50, insertable = false, updatable = false)
+    private String nickname;
+
     /** 좌석 선택 시각 */
     @Column(name = "joined_at")
     private LocalDateTime joinedAt;
@@ -80,6 +84,12 @@ public class GameSeat {
      */
     public void claim(UUID playerId) {
         this.playerId = playerId;
+        this.joinedAt = LocalDateTime.now();
+    }
+
+    public void claim(UUID playerId, String nickname) {
+        this.playerId = playerId;
+        this.nickname = nickname;
         this.joinedAt = LocalDateTime.now();
     }
 }

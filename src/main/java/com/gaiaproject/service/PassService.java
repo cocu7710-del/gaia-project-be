@@ -13,6 +13,7 @@ import com.gaiaproject.domain.enumtype.action.VpCategory;
 import com.gaiaproject.domain.enumtype.booster.RoundBoosterType;
 import com.gaiaproject.domain.enumtype.player.PlanetType;
 import com.gaiaproject.dto.PassContextVo;
+import com.gaiaproject.dto.request.PassRoundRequest;
 import com.gaiaproject.dto.response.PassRoundResponse;
 import com.gaiaproject.repository.booster.GameBoosterOfferRepository;
 import com.gaiaproject.repository.building.GameBuildingRepository;
@@ -57,12 +58,47 @@ public class PassService {
     private final ActionService actionService;
     private final com.gaiaproject.repository.tech.GamePlayerTechTileRepository playerTechTileRepository;
     private final com.gaiaproject.repository.player.GamePlayerFederationTokenRepository federationTokenRepository;
-    private final com.gaiaproject.repository.player.GamePlayerArtifactRepository playerArtifactRepository;
+    private final GameCalculationService gameCalculationService;
+    private final PowerActionService powerActionService;
+    private final FreeConvertService freeConvertService;
 
     /**
-     * 라운드 패스 (다음 라운드 부스터 선택 포함)
+     * 라운드 패스 (다음 라운드 부스터 선택 포함) — 레거시 호출부 호환용 오버로드
      */
     public PassRoundResponse passRound(UUID gameId, UUID playerId, String nextRoundBoosterCode) {
+        return passRound(gameId, playerId, nextRoundBoosterCode, 0, null);
+    }
+
+    /**
+     * 라운드 패스 + 파워 소각 + 프리 자원 변환 통합 처리 (Phase 3).
+     *
+     * 기존에는 FE 가 burnPower / freeConvert API 를 개별 호출 후 passRound 를 호출하여
+     * 3~N 회의 HTTP 요청이 발생했다. 이제 한 요청에 모아 순서대로 적용한다.
+     *
+     * 적용 순서
+     *   1) 파워 소각 (burnPowerCount 만큼)
+     *   2) 프리 자원 변환 (freeConverts 순서대로)
+     *   3) 본래의 pass 로직 (VP 지급, 부스터 교체, 라운드 종료 판정)
+     */
+    public PassRoundResponse passRound(UUID gameId, UUID playerId, String nextRoundBoosterCode,
+                                       Integer burnPowerCount,
+                                       List<PassRoundRequest.FreeConvertEntry> freeConverts) {
+        // 1. 파워 소각
+        int burnCount = burnPowerCount == null ? 0 : burnPowerCount;
+        for (int i = 0; i < burnCount; i++) {
+            powerActionService.burnPower(gameId, playerId);
+        }
+
+        // 2. 프리 자원 변환
+        if (freeConverts != null) {
+            for (var fc : freeConverts) {
+                if (fc == null || fc.convertCode() == null) continue;
+                boolean useBrain = Boolean.TRUE.equals(fc.useBrainstone());
+                freeConvertService.convert(gameId, playerId, fc.convertCode(), useBrain);
+            }
+        }
+
+        // 3. 본래 pass 로직
         Game game = gameRepository.findById(gameId)
                 .orElseThrow(() -> new IllegalArgumentException("게임을 찾을 수 없습니다"));
 
@@ -99,7 +135,7 @@ public class PassService {
             }
         }
 
-        // 2. 고급 기술 타일 패스 VP 지급
+        // 2. 고급 기술 타일 패스 VP 지급 (타일별 개별 로그)
         {
             GamePlayerState ps = playerStateRepository.findByGameIdAndPlayerId(gameId, playerId)
                     .orElse(null);
@@ -114,50 +150,54 @@ public class PassService {
                         var advCode = com.gaiaproject.domain.enumtype.tech.AdvancedTechTileCode.valueOf(code);
                         String effect = advCode.getAbility().getSpecialEffect();
                         if (effect == null) continue;
-                        int vp = switch (effect) {
+                        int vp = 0;
+                        String logDesc = null;
+                        switch (effect) {
                             case "VP_PER_LOST_PLANET_PASS" -> {
-                                // 건물이 있는 깊은 구역 섹터 수 (건물 수가 아님)
                                 var deepBuildings = buildingRepository.findByGameIdAndPlayerId(gameId, playerId);
-                                java.util.Set<String> deepSectors = new java.util.HashSet<>();
-                                for (var b : deepBuildings) {
-                                    hexRepository.findByGameIdAndHexQAndHexR(gameId, b.getHexQ(), b.getHexR()).ifPresent(h -> {
-                                        if (h.getSectorId() != null && h.getSectorId().startsWith("DEEP_SECTOR")) {
-                                            deepSectors.add(h.getSectorId());
-                                        }
-                                    });
-                                }
-                                yield deepSectors.size() * 2;
+                                var allHexes2 = hexRepository.findByGameId(gameId);
+                                java.util.Map<String, GameHex> hexByCoord2 = new java.util.HashMap<>();
+                                for (GameHex h : allHexes2) hexByCoord2.put(h.getHexQ() + "," + h.getHexR(), h);
+                                int deepCount = gameCalculationService.getDeepSectorCount(deepBuildings, hexByCoord2);
+                                vp = deepCount * 2;
+                                logDesc = code + " 패스 VP (깊은구역 " + deepCount + " × 2)";
                             }
                             case "VP_PER_ASTEROID_SECTOR_PASS" -> {
-                                // 소행성 구역 수 (sectorId 기반)
-                                var buildings = buildingRepository.findByGameIdAndPlayerId(gameId, playerId);
-                                var hexRepo = hexRepository;
-                                java.util.Set<String> asteroidSectors = new java.util.HashSet<>();
-                                for (var b : buildings) {
-                                    hexRepo.findByGameIdAndHexQAndHexR(gameId, b.getHexQ(), b.getHexR()).ifPresent(h -> {
-                                        if (h.getPlanetType() == com.gaiaproject.domain.enumtype.player.PlanetType.ASTEROIDS && h.getSectorId() != null) {
-                                            asteroidSectors.add(h.getSectorId());
-                                        }
-                                    });
-                                }
-                                yield asteroidSectors.size() * 2;
+                                var buildings = buildingRepository.findByGameIdAndPlayerId(gameId, playerId).stream()
+                                        .filter(b -> b.getBuildingType() != com.gaiaproject.domain.enumtype.building.BuildingType.GAIAFORMER)
+                                        .toList();
+                                var allHexes = hexRepository.findByGameId(gameId);
+                                java.util.Map<String, GameHex> hexByCoord = new java.util.HashMap<>();
+                                for (GameHex h : allHexes) hexByCoord.put(h.getHexQ() + "," + h.getHexR(), h);
+                                int asteroidCount = gameCalculationService.getAsteroidBuildingCount(buildings, hexByCoord, gameId, playerId);
+                                vp = asteroidCount * 2;
+                                logDesc = code + " 패스 VP (소행성 " + asteroidCount + " × 2)";
                             }
                             case "VP_PER_FEDERATION_TOKEN_PASS" -> {
                                 long fedCount = federationTokenRepository.countByGameIdAndPlayerId(gameId, playerId);
-                                yield (int) fedCount * 3;
+                                vp = (int) fedCount * 3;
+                                logDesc = code + " 패스 VP (연방토큰 " + fedCount + " × 3)";
                             }
-                            case "VP_PER_LAB_PASS" -> ctx.researchLabs() * 3;
-                            case "VP_PER_PLANET_TYPE_PASS" -> ctx.colonizedPlanetTypeKinds() * 1;
-                            default -> 0;
-                        };
-                        advPassVp += vp;
+                            case "VP_PER_LAB_PASS" -> {
+                                vp = ctx.researchLabs() * 3;
+                                logDesc = code + " 패스 VP (연구소 " + ctx.researchLabs() + " × 3)";
+                            }
+                            case "VP_PER_PLANET_TYPE_PASS" -> {
+                                vp = ctx.colonizedPlanetTypeKinds();
+                                logDesc = code + " 패스 VP (행성종류 " + ctx.colonizedPlanetTypeKinds() + " × 1)";
+                            }
+                            default -> { /* no-op */ }
+                        }
+                        if (vp > 0 && logDesc != null) {
+                            vpLogService.logVp(gameId, playerId, VpCategory.ADV_TECH_TILE, vp, currentRound, logDesc);
+                            advPassVp += vp;
+                        }
                     } catch (IllegalArgumentException ignored) {}
                 }
                 if (advPassVp > 0) {
                     ps.addVP(advPassVp);
-                    vpLogService.logVp(gameId, playerId, VpCategory.ADV_TECH_TILE, advPassVp, currentRound, "고급 타일 패스 VP");
                     playerStateRepository.save(ps);
-                    log.info("고급 타일 패스 VP: playerId={}, vp={}", playerId, advPassVp);
+                    log.info("고급 타일 패스 VP 합계: playerId={}, vp={}", playerId, advPassVp);
                 }
             }
         }
@@ -271,6 +311,9 @@ public class PassService {
             actionService.startTurnTimerBySeatNo(gameId, nextSeatNo);
         }
 
+        // C안: 상태 변경 후 snapshot broadcast
+        webSocketService.broadcastStateUpdated(gameId);
+
         return PassRoundResponse.success(gameId, playerId, currentRound, nextSeatNo, allPassed);
     }
 
@@ -353,26 +396,16 @@ public class PassService {
         }
 
         int gaiaPlanets = (int) hexPlanetMap.values().stream().filter(p -> p == PlanetType.GAIA).count();
-        // 딥섹터 건물 수 (LOST_PLANET뿐 아니라 딥섹터 내 모든 건물)
-        int deepStructures = (int) buildings.stream().filter(b -> {
-            GameHex hex = hexLookup.get(b.getHexQ() + "," + b.getHexR());
-            return hex != null && hex.getSectorId() != null && hex.getSectorId().startsWith("DEEP_SECTOR");
-        }).count();
-        long colonizedKinds = hexPlanetMap.values().stream()
-                .filter(p -> p != PlanetType.EMPTY && p != PlanetType.TRANSDIM && p != PlanetType.GAIA)
-                .distinct().count();
-
-        // 가이아 행성도 종류에 포함
-        if (gaiaPlanets > 0) colonizedKinds++;
-        // 인공물 가상 행성 종류
-        java.util.Set<PlanetType> kindSet = hexPlanetMap.values().stream()
-                .filter(p -> p != PlanetType.EMPTY && p != PlanetType.TRANSDIM)
-                .collect(java.util.stream.Collectors.toSet());
-        if (playerArtifactRepository.existsByGameIdAndPlayerIdAndArtifactType(gameId, playerId, "ARTIFACT_7") && !kindSet.contains(PlanetType.ASTEROIDS)) colonizedKinds++;
-        if (playerArtifactRepository.existsByGameIdAndPlayerIdAndArtifactType(gameId, playerId, "ARTIFACT_8") && !kindSet.contains(PlanetType.LOST_PLANET)) colonizedKinds++;
+        // 건물이 있는 깊은 구역 고유 섹터 수
+        int deepStructures = gameCalculationService.getDeepSectorCount(buildings, hexLookup);
+        // 인공물 포함 행성 종류 수
+        List<GameBuilding> nonGfBuildings = buildings.stream()
+                .filter(b -> b.getBuildingType() != BuildingType.GAIAFORMER)
+                .toList();
+        int colonizedKinds = gameCalculationService.getPlanetTypeCount(nonGfBuildings, hexLookup, gameId, playerId);
 
         return new PassContextVo(mines, tradingStations, researchLabs, academies, planetaryInsts,
-                gaiaPlanets, gaiaformers, deepStructures, (int) colonizedKinds);
+                gaiaPlanets, gaiaformers, deepStructures, colonizedKinds);
     }
 
     /**
@@ -433,6 +466,8 @@ public class PassService {
                 gameRepository.save(game);
                 webSocketService.broadcast(com.gaiaproject.dto.websocket.GameEvent.of(gameId, "POWER_INCOME_CHOICE",
                         java.util.Map.of("players", allPlayerItems)));
+                // FE 일부 상태 동기화 보장 (BUG_REPORTS #19, #15/#17/#18 동일 패턴)
+                webSocketService.broadcastStateUpdated(gameId);
                 log.info("파워 수입 동시 선택 대기: game={}, 대상 {}명", gameId, allPlayerItems.size());
                 return true;
             }
@@ -465,6 +500,8 @@ public class PassService {
             webSocketService.broadcast(com.gaiaproject.dto.websocket.GameEvent.of(gameId, "TERRANS_GAIA_CHOICE",
                     java.util.Map.of("terransPlayerId", terransPlayer.getPlayerId().toString(),
                             "gaiaPower", terransPlayer.getGaiaPower())));
+            // FE 일부 상태 동기화 보장 (BUG_REPORTS #19)
+            webSocketService.broadcastStateUpdated(gameId);
             log.info("테란 가이아 변환 대기: game={}, gaia={}", gameId, terransPlayer.getGaiaPower());
             return true; // 대기
         }
@@ -481,6 +518,8 @@ public class PassService {
                 game.setGamePhase("TINKEROIDS_ACTION_PHASE");
                 gameRepository.save(game);
                 webSocketService.broadcastTinkeroidsActionChoice(gameId, tinkeroidsPlayer.getPlayerId(), available, game.getCurrentRound());
+                // FE 일부 상태 동기화 보장 (BUG_REPORTS #19)
+                webSocketService.broadcastStateUpdated(gameId);
                 log.info("팅커로이드 액션 선택 대기: game={}, round={}, available={}", gameId, game.getCurrentRound(), available);
                 return true;
             }
@@ -510,6 +549,8 @@ public class PassService {
             gameRepository.save(game);
 
             webSocketService.broadcastItarsGaiaChoice(gameId, itarsPlayer.getPlayerId(), keep / 4);
+            // FE 일부 상태 동기화 보장 (BUG_REPORTS #19)
+            webSocketService.broadcastStateUpdated(gameId);
             log.info("아이타 가이아 선택 대기: game={}, player={}, choices={}", gameId, itarsPlayer.getPlayerId(), keep / 4);
             return true;
         }
@@ -556,6 +597,8 @@ public class PassService {
             game.setGamePhase("ITARS_GAIA_PHASE");
             gameRepository.save(game);
             webSocketService.broadcastItarsGaiaChoice(gameId, itarsPlayer.getPlayerId(), keep / 4);
+            // FE 가 currentTurnSeatNo 등 라운드 시작 상태를 받도록 snapshot 동기화 (BUG_REPORTS #15)
+            webSocketService.broadcastStateUpdated(gameId);
             return;
         }
 
@@ -564,6 +607,8 @@ public class PassService {
         game.setGamePhase("PLAYING");
         gameRepository.save(game);
         webSocketService.broadcastRoundStarted(gameId, game.getCurrentRound());
+        // FE 가 currentTurnSeatNo 등 라운드 시작 상태를 받도록 snapshot 동기화 (BUG_REPORTS #15)
+        webSocketService.broadcastStateUpdated(gameId);
     }
 
     /**
@@ -646,6 +691,7 @@ public class PassService {
             webSocketService.broadcast(com.gaiaproject.dto.websocket.GameEvent.of(gameId, "TERRANS_GAIA_CHOICE",
                     java.util.Map.of("terransPlayerId", terransPlayer.getPlayerId().toString(),
                             "gaiaPower", terransPlayer.getGaiaPower())));
+            webSocketService.broadcastStateUpdated(gameId);
             return;
         }
 
@@ -664,6 +710,7 @@ public class PassService {
                 webSocketService.broadcast(com.gaiaproject.dto.websocket.GameEvent.of(gameId, "TINKEROIDS_ACTION_CHOICE",
                         java.util.Map.of("tinkeroidsPlayerId", tinkeroidsPlayer.getPlayerId().toString(),
                                 "availableActions", available, "currentRound", round)));
+                webSocketService.broadcastStateUpdated(gameId);
                 return;
             }
         }
@@ -687,6 +734,7 @@ public class PassService {
             game.setGamePhase("ITARS_GAIA_PHASE");
             gameRepository.save(game);
             webSocketService.broadcastItarsGaiaChoice(gameId, itarsPlayer.getPlayerId(), keep / 4);
+            webSocketService.broadcastStateUpdated(gameId);
             return;
         }
 
@@ -695,6 +743,8 @@ public class PassService {
         game.setGamePhase("PLAYING");
         gameRepository.save(game);
         webSocketService.broadcastRoundStarted(gameId, game.getCurrentRound());
+        // C안: PLAYING 페이즈 진입 시 snapshot broadcast (FE 상태 동기화)
+        webSocketService.broadcastStateUpdated(gameId);
     }
 
     /** 테란 가이아 변환 완료 후 다음 단계 진행 (팅커→아이타→라운드 시작) */
@@ -714,6 +764,8 @@ public class PassService {
                 game.setGamePhase("TINKEROIDS_ACTION_PHASE");
                 gameRepository.save(game);
                 webSocketService.broadcastTinkeroidsActionChoice(gameId, tinkeroidsPlayer.getPlayerId(), available, game.getCurrentRound());
+                // FE 일부 상태 동기화 보장 (BUG_REPORTS #19)
+                webSocketService.broadcastStateUpdated(gameId);
                 return;
             }
         }

@@ -42,6 +42,7 @@ public class GaiaformingService {
     private final GameHexRepository hexRepository;
     private final ActionService actionService;
     private final GameWebSocketService webSocketService;
+    private final GameCalculationService gameCalculationService;
 
     /**
      * 가이아 트랙 레벨 → 필요 파워 토큰 수
@@ -99,6 +100,25 @@ public class GaiaformingService {
         // 이미 건물이 있는지 확인
         if (buildingRepository.existsByGameIdAndHexQAndHexR(gameId, request.hexQ(), request.hexR())) {
             return DeployGaiaformerResponse.fail(gameId, "이미 건물이 있는 위치입니다");
+        }
+
+        // 항법 거리 체크 (PLACE_MINE/TF_MARS_GAIAFORM과 동일 — 거리 트랙 + BASIC_EXP_TILE_1 + QIC×2)
+        int navRange = switch (ps.getTechNavigation()) {
+            case 0, 1 -> 1; case 2, 3 -> 2; case 4 -> 3; default -> 4;
+        };
+        if (gameCalculationService.hasActiveTechTile(gameId, request.playerId(), "BASIC_EXP_TILE_1")) {
+            navRange += 1;
+        }
+        int finalNavRange = navRange + (request.qicUsed() > 0 ? request.qicUsed() * 2 : 0);
+        java.util.List<GameBuilding> myBuildings = buildingRepository.findByGameIdAndPlayerId(gameId, request.playerId());
+        boolean inRange = myBuildings.stream().anyMatch(b -> {
+            int dq = request.hexQ() - b.getHexQ();
+            int dr = request.hexR() - b.getHexR();
+            int dist = (Math.abs(dq) + Math.abs(dr) + Math.abs(dq + dr)) / 2;
+            return dist <= finalNavRange;
+        });
+        if (!inRange) {
+            return DeployGaiaformerResponse.fail(gameId, "항법 거리 밖입니다 (현재 거리: " + finalNavRange + ")");
         }
 
         int powerSpent = 0;

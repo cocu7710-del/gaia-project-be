@@ -30,6 +30,8 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
+    baseline-on-migrate: true   # public 에 pgcrypto extension(함수들) 때문에 "non-empty" 로 인식 — baseline 자동 생성
+    baseline-version: 0         # baseline 을 V0 으로 → V1 부터 정상 적용 (기본값 1 이면 V1 을 건너뜀)
 #    clean-disabled: false
 
 logging:

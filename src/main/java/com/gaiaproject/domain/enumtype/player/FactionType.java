@@ -166,8 +166,8 @@ public enum FactionType {
             case BESCODS -> new ResourcesVo(0, 0, 0, 0, 2, 0, 0, 4, 0, null);
             // 스페이스 자이언트: 6파순 + 1토큰
             case SPACE_GIANTS -> new ResourcesVo(0, 0, 0, 0, 1, 0, 0, 6, 0, null);
-            // 란티다: 4파순 + 1토큰
-            case LANTIDS -> new ResourcesVo(0, 0, 0, 0, 1, 0, 0, 4, 0, null);
+            // 란티다: 4파순 (토큰 없음)
+            case LANTIDS -> new ResourcesVo(0, 0, 0, 0, 0, 0, 0, 4, 0, null);
             // 기본: 4파순 + 1토큰
             default -> new ResourcesVo(0, 0, 0, 0, 1, 0, 0, 4, 0, null);
         };

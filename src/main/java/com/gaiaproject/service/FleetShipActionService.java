@@ -63,6 +63,8 @@ public class FleetShipActionService {
     private final GamePlayerFederationTokenRepository federationTokenRepository;
     private final com.gaiaproject.repository.player.GamePlayerArtifactRepository playerArtifactRepository;
     private final com.gaiaproject.repository.artifact.GameArtifactOfferRepository artifactOfferRepository;
+    private final GameCalculationService gameCalculationService;
+    private final GameWebSocketService webSocketService;
 
     /** 함대 선박 특수 액션 실행 */
     public FleetShipActionResponse executeAction(UUID gameId, FleetShipActionRequest request) {
@@ -96,7 +98,7 @@ public class FleetShipActionService {
                 // === ECLIPSE ===
                 case "ECLIPSE_VP" -> executeEclipseVp(gameId, playerId, ps, actionCode);
                 case "ECLIPSE_TECH" -> executeEclipseTech(gameId, playerId, ps, actionCode, request.trackCode());
-                case "ECLIPSE_MINE" -> executeEclipseMine(gameId, playerId, ps, actionCode, request.hexQ(), request.hexR());
+                case "ECLIPSE_MINE" -> executeEclipseMine(gameId, playerId, ps, actionCode, request.hexQ(), request.hexR(), request.qicUsed());
 
                 // === REBELLION ===
                 case "REBELLION_TECH" -> executeRebellionTech(gameId, playerId, ps, actionCode, request.trackCode(), request.techTrackCode(), request.coveredTileCode(), Boolean.TRUE.equals(request.splitAction()));
@@ -105,7 +107,7 @@ public class FleetShipActionService {
 
                 // === TWILIGHT ===
                 case "TWILIGHT_FED" -> executeTwilightFed(gameId, playerId, ps, actionCode, request.federationTileCode(), request.trackCode(), request.techTrackCode(), request.coveredTileCode());
-                case "TWILIGHT_UPGRADE" -> executeTwilightUpgrade(gameId, playerId, ps, actionCode, request.hexQ(), request.hexR(), request.trackCode(), request.techTrackCode(), request.coveredTileCode());
+                case "TWILIGHT_UPGRADE" -> executeTwilightUpgrade(gameId, playerId, ps, actionCode, request.hexQ(), request.hexR(), request.trackCode(), request.techTrackCode(), request.coveredTileCode(), request.mineHexQ(), request.mineHexR(), request.mineQicUsed());
                 case "TWILIGHT_NAV" -> executeTwilightNav(gameId, playerId, ps, actionCode);
                 case "TWILIGHT_ARTIFACT" -> executeTwilightArtifact(gameId, playerId, ps, actionCode, request.trackCode(), request.federationTileCode(), request.techTrackCode(), request.coveredTileCode());
 
@@ -164,12 +166,27 @@ public class FleetShipActionService {
         if (buildingRepository.existsByGameIdAndHexQAndHexR(gameId, hexQ, hexR))
             return FleetShipActionResponse.fail(gameId, code, "이미 건물이 있는 위치입니다");
 
-        // QIC 거리 확장 소모
+        // QIC 거리 확장 검증
         int qic = qicUsed != null ? qicUsed : 0;
-        if (qic > 0) {
-            if (ps.getQic() < qic) return FleetShipActionResponse.fail(gameId, code, "QIC가 부족합니다");
-            ps.spendQic(qic);
+        if (qic > 0 && ps.getQic() < qic) return FleetShipActionResponse.fail(gameId, code, "QIC가 부족합니다");
+
+        // 항법 거리 체크 (PlaceMine과 동일 규칙: 거리 트랙 + BASIC_EXP_TILE_1 + QIC×2)
+        int navRange = switch (ps.getTechNavigation()) {
+            case 0, 1 -> 1; case 2, 3 -> 2; case 4 -> 3; default -> 4;
+        };
+        if (gameCalculationService.hasActiveTechTile(gameId, playerId, "BASIC_EXP_TILE_1")) {
+            navRange += 1;
         }
+        int finalNavRange = navRange + qic * 2;
+        java.util.List<com.gaiaproject.domain.entity.building.GameBuilding> myBuildings =
+                buildingRepository.findByGameIdAndPlayerId(gameId, playerId);
+        boolean inRange = myBuildings.stream().anyMatch(b ->
+                hexDistance(b.getHexQ(), b.getHexR(), hexQ, hexR) <= finalNavRange);
+        if (!inRange) {
+            return FleetShipActionResponse.fail(gameId, code, "항법 거리 밖입니다 (현재 거리: " + finalNavRange + ")");
+        }
+
+        if (qic > 0) ps.spendQic(qic);
 
         // 파워 2 소비 + 가이아포머 재고 소모
         if (ps.getStockGaiaformer() <= 0) {
@@ -220,8 +237,8 @@ public class FleetShipActionService {
                 .filter(pt -> pt != null && pt != PlanetType.EMPTY && pt != PlanetType.TRANSDIM)
                 .collect(Collectors.toSet());
         // 인공물 가상 행성 종류
-        if (playerArtifactRepository.existsByGameIdAndPlayerIdAndArtifactType(gameId, playerId, "ARTIFACT_7")) colonizedTypes.add(PlanetType.ASTEROIDS);
-        if (playerArtifactRepository.existsByGameIdAndPlayerIdAndArtifactType(gameId, playerId, "ARTIFACT_8")) colonizedTypes.add(PlanetType.LOST_PLANET);
+        if (gameCalculationService.hasArtifact(gameId, playerId, "ARTIFACT_7")) colonizedTypes.add(PlanetType.ASTEROIDS);
+        if (gameCalculationService.hasArtifact(gameId, playerId, "ARTIFACT_8")) colonizedTypes.add(PlanetType.LOST_PLANET);
         int vp = colonizedTypes.size() + 2;
         ps.addVP(vp);
         vpLogService.logVp(ps.getGameId(), ps.getPlayerId(), VpCategory.FLEET, vp, null, "ECLIPSE VP");
@@ -246,7 +263,7 @@ public class FleetShipActionService {
 
     /** ECLIPSE_MINE: 크레딧 6 → 소행성(ASTEROIDS) 행성에 광산 건설 */
     private FleetShipActionResponse executeEclipseMine(UUID gameId, UUID playerId, GamePlayerState ps, String code,
-                                                        Integer hexQ, Integer hexR) {
+                                                        Integer hexQ, Integer hexR, Integer qicUsed) {
         if (hexQ == null || hexR == null) return FleetShipActionResponse.fail(gameId, code, "헥스 좌표가 필요합니다");
 
         GameHex hex = hexRepository.findByGameIdAndHexQAndHexR(gameId, hexQ, hexR).orElse(null);
@@ -256,6 +273,26 @@ public class FleetShipActionService {
         if (buildingRepository.existsByGameIdAndHexQAndHexR(gameId, hexQ, hexR))
             return FleetShipActionResponse.fail(gameId, code, "이미 건물이 있는 위치입니다");
         if (ps.getStockMine() <= 0) return FleetShipActionResponse.fail(gameId, code, "광산 재고가 없습니다");
+
+        // 항법 거리 체크 (QIC로 확장 가능: QIC 1당 거리 +2)
+        int qic = qicUsed != null ? qicUsed : 0;
+        if (qic > 0 && ps.getQic() < qic) {
+            return FleetShipActionResponse.fail(gameId, code, "QIC가 부족합니다");
+        }
+        int navRange = switch (ps.getTechNavigation()) {
+            case 0 -> 1; case 1 -> 1; case 2 -> 2; case 3 -> 2; case 4 -> 3; default -> 4;
+        };
+        if (gameCalculationService.hasActiveTechTile(gameId, playerId, "BASIC_EXP_TILE_1")) {
+            navRange += 1;
+        }
+        final int finalNavRange = navRange + qic * 2;
+        List<GameBuilding> myBuildings = buildingRepository.findByGameIdAndPlayerId(gameId, playerId);
+        boolean inRange = myBuildings.stream().anyMatch(b ->
+                hexDistance(b.getHexQ(), b.getHexR(), hexQ, hexR) <= finalNavRange);
+        if (!inRange) {
+            return FleetShipActionResponse.fail(gameId, code, "항법 거리 밖입니다 (현재 거리: " + finalNavRange + ")");
+        }
+        if (qic > 0) ps.spendQic(qic);
 
         ps.spendCredit(6);
         ps.decreaseStockMine();
@@ -268,8 +305,9 @@ public class FleetShipActionService {
 
         // 라운드 점수: 광산 건설
         roundScoringService.award(gameId, game.getCurrentRound(), ps, com.gaiaproject.domain.enumtype.rounds.RoundScoringEvent.MINE_PLACED, 1);
-        // 새 섹터 진출 점수
-        if (buildingRepository.findByGameIdAndPlayerId(gameId, playerId).stream()
+        // 새 섹터 진출 점수 (1헥스 섹터는 실제 섹터가 아니므로 제외)
+        if (com.gaiaproject.domain.entity.map.GameHex.isRealSector(hex.getSectorId())
+                && buildingRepository.findByGameIdAndPlayerId(gameId, playerId).stream()
                 .filter(b -> b.getId() != mine.getId())
                 .noneMatch(b -> {
                     var h = hexRepository.findByGameIdAndHexQAndHexR(gameId, b.getHexQ(), b.getHexR()).orElse(null);
@@ -349,7 +387,7 @@ public class FleetShipActionService {
         String actionData = String.format("{\"actionCode\":\"%s\",\"hexQ\":%d,\"hexR\":%d}", code, hexQ, hexR);
         String error = buildingService.upgradeCore(game, playerId, building, BuildingType.TRADING_STATION,
                 null, null, null, null,
-                ActionType.FLEET_SHIP_ACTION, actionData, true, null, null);
+                ActionType.FLEET_SHIP_ACTION, actionData, true, null, null, null, null, null);
         if (error != null) return FleetShipActionResponse.fail(gameId, code, error);
 
         log.info("[함대] {}: game={}, player={}, hex=({},{})", code, gameId, playerId, hexQ, hexR);
@@ -399,7 +437,21 @@ public class FleetShipActionService {
         if (specialAction == FederationActionType.GAIN_BASIC_TECH_TILE) {
             if (trackCode != null && !trackCode.isEmpty()) {
                 var game = gameRepository.findById(gameId).orElseThrow();
-                techTileService.acquireTileForBuilding(gameId, playerId, trackCode, techTrackCode, game.getEconomyTrackOption(), coveredTileCode);
+                var tileResult = techTileService.acquireTileForBuilding(gameId, playerId, trackCode, techTrackCode, game.getEconomyTrackOption(), coveredTileCode);
+                // 2삽 광산 / 검은행성 후속 액션
+                if (tileResult != null && (tileResult.needsMine() || tileResult.needsLostPlanet())) {
+                    String actionData = String.format("{\"actionCode\":\"%s\",\"federationTileCode\":\"%s\"}", code, federationTileCode);
+                    actionService.saveActionOnly(gameId, playerId, ActionType.FLEET_SHIP_ACTION, actionData);
+                    if (tileResult.needsMine()) {
+                        webSocketService.broadcastDeferredActionRequired(gameId, playerId,
+                                "PLACE_MINE_TERRAFORM_2", String.format("{\"terraformDiscount\":2,\"triggerPlayerId\":\"%s\"}", playerId));
+                    } else {
+                        webSocketService.broadcastDeferredActionRequired(gameId, playerId,
+                                "PLACE_LOST_PLANET", String.format("{\"triggerPlayerId\":\"%s\"}", playerId));
+                    }
+                    log.info("[함대] {}: game={}, player={}, tile={}, needsMine={}, needsLP={}", code, gameId, playerId, federationTileCode, tileResult.needsMine(), tileResult.needsLostPlanet());
+                    return FleetShipActionResponse.success(gameId, code, 0, null, false);
+                }
             }
             ConfirmActionResponse result = endTurn(gameId, playerId, code);
             log.info("[함대] {}: game={}, player={}, tile={}", code, gameId, playerId, federationTileCode);
@@ -431,7 +483,8 @@ public class FleetShipActionService {
     /** TWILIGHT_UPGRADE: 파워 3 + 광석 2 → 자신의 교역소를 연구소로 업그레이드 + 기술 타일 획득 */
     private FleetShipActionResponse executeTwilightUpgrade(UUID gameId, UUID playerId, GamePlayerState ps, String code,
                                                              Integer hexQ, Integer hexR,
-                                                             String tileCode, String techTrackCode, String coveredTileCode) {
+                                                             String tileCode, String techTrackCode, String coveredTileCode,
+                                                             Integer mineHexQ, Integer mineHexR, Integer mineQicUsed) {
         if (hexQ == null || hexR == null) return FleetShipActionResponse.fail(gameId, code, "헥스 좌표가 필요합니다");
 
         GameBuilding building = buildingRepository.findFirstByGameIdAndHexQAndHexRAndIsLantidsMine(gameId, hexQ, hexR, false).orElse(null);
@@ -452,7 +505,7 @@ public class FleetShipActionService {
         try {
             String error = buildingService.upgradeCore(game, playerId, building, BuildingType.RESEARCH_LAB,
                     null, tileCode, techTrackCode, coveredTileCode,
-                    ActionType.FLEET_SHIP_ACTION, actionData, false, null, null);
+                    ActionType.FLEET_SHIP_ACTION, actionData, true, null, null, mineHexQ, mineHexR, mineQicUsed);
             if (error != null) return FleetShipActionResponse.fail(gameId, code, error);
         } catch (IllegalStateException e) {
             return FleetShipActionResponse.fail(gameId, code, e.getMessage());
@@ -592,5 +645,11 @@ public class FleetShipActionService {
         if (actionCode.startsWith("REBELLION_")) return "REBELLION";
         if (actionCode.startsWith("TWILIGHT_")) return "TWILIGHT";
         return null;
+    }
+
+    /** 헥스 거리 (flat-top axial) */
+    private int hexDistance(int q1, int r1, int q2, int r2) {
+        int dq = q2 - q1, dr = r2 - r1;
+        return (Math.abs(dq) + Math.abs(dr) + Math.abs(dq + dr)) / 2;
     }
 }

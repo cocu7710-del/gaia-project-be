@@ -12,13 +12,13 @@ import com.gaiaproject.repository.game.GameRepository;
 import com.gaiaproject.repository.game.GameSeatRepository;
 import com.gaiaproject.repository.leech.GameLeechOfferRepository;
 import com.gaiaproject.repository.player.GamePlayerStateRepository;
-import com.gaiaproject.repository.tech.GamePlayerTechTileRepository;
 import org.springframework.transaction.annotation.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -32,10 +32,11 @@ public class PowerLeechService {
     private final GameRepository gameRepository;
     private final GameWebSocketService webSocketService;
     private final ActionService actionService;
-    private final GamePlayerTechTileRepository playerTechTileRepository;
     private final com.gaiaproject.repository.map.GameHexRepository hexRepository;
     private final com.gaiaproject.repository.building.GameBuildingRepository buildingRepository;
     private final VpLogService vpLogService;
+    private final GameCalculationService gameCalculationService;
+    private final com.gaiaproject.repository.game.GamePlayerPassRepository passRepository;
 
     /**
      * 건물 배치/업그레이드 후 파워 리치 배치 처리.
@@ -52,6 +53,7 @@ public class PowerLeechService {
                                        String followUpType, String followUpData) {
         // 게임 종료 후에는 리치 생성하지 않음
         if ("FINISHED".equals(game.getGamePhase()) || "FINISHED".equals(game.getStatus())) {
+            if (followUpType == null) actionService.advanceTurnAndBroadcast(game);
             return;
         }
         if (buildingPowerValue(newType) == 0) {
@@ -106,6 +108,13 @@ public class PowerLeechService {
         int seqNo = 0;
         boolean isFirstOffer = true;
 
+        // 6라운드에서 이미 패스한 플레이어는 리치 오퍼 대상에서 제외 (게임이 끝나가므로 의미 없음)
+        final boolean skipPassedPlayers = game.getCurrentRound() != null && game.getCurrentRound() == 6;
+        final Set<UUID> passedPlayerIds = skipPassedPlayers
+                ? passRepository.findByGameIdAndRoundNumber(gameId, 6).stream()
+                    .map(p -> p.getPlayerId()).collect(Collectors.toSet())
+                : Collections.emptySet();
+
         // 트리거 플레이어 다음 좌석부터 순서대로 처리
         for (int i = 1; i <= maxSeatNo; i++) {
             int checkSeatNo = ((triggerSeatNo - 1 + i) % maxSeatNo) + 1;
@@ -114,6 +123,9 @@ public class PowerLeechService {
                     .filter(s -> s.getSeatNo() == checkSeatNo)
                     .findFirst().orElse(null);
             if (seat == null || seat.getPlayerId() == null) continue;
+
+            // 6라운드 패스 완료한 플레이어는 리치 제외
+            if (passedPlayerIds.contains(seat.getPlayerId())) continue;
 
             Integer power = maxPowerByPlayer.get(seat.getPlayerId());
             if (power == null || power == 0) continue;
@@ -235,6 +247,8 @@ public class PowerLeechService {
             // 모든 PENDING offer를 동시에 브로드캐스트 (각 플레이어가 독립적으로 결정)
             broadcastLeechOfferedAll(gameId, batchKey, pendingOffers);
         }
+        // C안: 상태 변경 후 snapshot broadcast (auto-accept 리치 등 반영)
+        webSocketService.broadcastStateUpdated(gameId);
     }
 
     /**
@@ -243,6 +257,13 @@ public class PowerLeechService {
     public void decidePowerLeech(UUID gameId, UUID leechId, UUID decidingPlayerId,
                                   boolean accept, String taklonsChoice) {
         GameLeechOffer offer = leechOfferRepository.findById(leechId)
+                .orElseThrow(() -> new IllegalArgumentException("리치 오퍼를 찾을 수 없습니다"));
+
+        // 동일 batch 의 모든 offer 를 PESSIMISTIC_WRITE 로 잠금 — 동시 decide 호출 직렬화
+        // 다른 스레드가 같은 batch 를 처리 중이면 여기서 대기, commit 후 진행
+        leechOfferRepository.lockBatchForUpdate(gameId, offer.getBatchKey());
+        // 락 획득 후 offer 재조회 (다른 스레드가 이미 결정했을 수 있음)
+        offer = leechOfferRepository.findById(leechId)
                 .orElseThrow(() -> new IllegalArgumentException("리치 오퍼를 찾을 수 없습니다"));
 
         if (!offer.getReceivePlayerId().equals(decidingPlayerId)) {
@@ -307,6 +328,8 @@ public class PowerLeechService {
                 actionService.advanceTurnAndBroadcast(game);
             }
         }
+        // C안: 상태 변경 후 snapshot broadcast
+        webSocketService.broadcastStateUpdated(gameId);
     }
 
     /**
@@ -320,15 +343,20 @@ public class PowerLeechService {
 
     private void applyPowerToPlayer(GamePlayerState ps, int power, int vpCost,
                                      boolean isTaklons, String taklonsChoice) {
+        int effectiveCharges;
         if (isTaklons && "TOKEN_FIRST".equals(taklonsChoice)) {
             ps.addPowerToken(1);
-            ps.chargePowerWithFactionRules(power);
+            effectiveCharges = ps.chargePowerWithFactionRules(power);
         } else {
-            ps.chargePowerWithFactionRules(power);
+            effectiveCharges = ps.chargePowerWithFactionRules(power);
             if (isTaklons) ps.addPowerToken(1);
         }
-        if (vpCost > 0) ps.addVP(-vpCost);
-        if (vpCost > 0) vpLogService.logVp(ps.getGameId(), ps.getPlayerId(), VpCategory.LEECH_COST, -vpCost, null, "파워 리치 비용");
+        // 실제 이동한 토큰 수 기준으로 vpCost 재계산 (선언된 vpCost는 상한선)
+        int actualVpCost = Math.min(vpCost, Math.max(0, effectiveCharges - 1));
+        if (actualVpCost > 0) {
+            ps.addVP(-actualVpCost);
+            vpLogService.logVp(ps.getGameId(), ps.getPlayerId(), VpCategory.LEECH_COST, -actualVpCost, null, "파워 리치 비용");
+        }
     }
 
     private GameLeechOffer saveOffer(UUID gameId, String batchKey, UUID triggerPlayerId,
@@ -378,10 +406,39 @@ public class PowerLeechService {
     }
 
     private void broadcastFollowUp(UUID gameId, UUID triggerPlayerId, String followUpType, String followUpData) {
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+
+        // 2삽 광산 리치: 내부적으로 리치 배치 발동
+        if ("MINE_LEECH".equals(followUpType) && followUpData != null) {
+            try {
+                var node = mapper.readTree(followUpData);
+                int mHexQ = node.get("hexQ").asInt();
+                int mHexR = node.get("hexR").asInt();
+                // 다음 체인 (검은행성 리치가 있으면)
+                String nextFollowUp = node.has("nextFollowUp") ? node.get("nextFollowUp").asText() : null;
+                String nextFollowUpData = null;
+                if ("LOST_PLANET_LEECH".equals(nextFollowUp)) {
+                    int lpQ = node.get("lpHexQ").asInt();
+                    int lpR = node.get("lpHexR").asInt();
+                    nextFollowUpData = String.format("{\"hexQ\":%d,\"hexR\":%d,\"playerId\":\"%s\"}", lpQ, lpR, triggerPlayerId);
+                }
+                Game game = gameRepository.findById(gameId).orElseThrow();
+                List<GameBuilding> allBlds = buildingRepository.findByGameId(gameId);
+                createBatchAndProcess(game, triggerPlayerId, mHexQ, mHexR,
+                        com.gaiaproject.domain.enumtype.building.BuildingType.MINE, allBlds, nextFollowUp, nextFollowUpData);
+                log.info("[LEECH] 2삽 광산 리치 자동 발동: game={}, hex=({},{}), nextFollowUp={}", gameId, mHexQ, mHexR, nextFollowUp);
+                return;
+            } catch (Exception e) {
+                log.error("[LEECH] 2삽 광산 리치 처리 실패, 턴 진행으로 대체", e);
+                Game game = gameRepository.findById(gameId).orElse(null);
+                if (game != null) actionService.advanceTurnAndBroadcast(game);
+                return;
+            }
+        }
+
         // 검은행성 리치: 내부적으로 리치 배치 발동
         if ("LOST_PLANET_LEECH".equals(followUpType) && followUpData != null) {
             try {
-                var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
                 var node = mapper.readTree(followUpData);
                 int lpHexQ = node.get("hexQ").asInt();
                 int lpHexR = node.get("hexR").asInt();
@@ -425,17 +482,10 @@ public class PowerLeechService {
     private int buildingPowerValue(BuildingType type, UUID gameId, UUID playerId) {
         int base = buildingPowerValue(type);
         if ((type == BuildingType.PLANETARY_INSTITUTE || type == BuildingType.ACADEMY)
-                && hasActiveTechTile(gameId, playerId, "BASIC_TILE_9")) {
+                && gameCalculationService.hasActiveTechTile(gameId, playerId, "BASIC_TILE_9")) {
             base += 1;
         }
         return base;
-    }
-
-    private boolean hasActiveTechTile(UUID gameId, UUID playerId, String tileCode) {
-        return playerTechTileRepository
-                .findByGameIdAndPlayerIdAndIsCovered(gameId, playerId, false)
-                .stream()
-                .anyMatch(t -> tileCode.equals(t.getTechTileCode()));
     }
 
     private int hexDistance(int q1, int r1, int q2, int r2) {
