@@ -277,8 +277,7 @@ public class PassService {
         int nextSeatNo;
         if (allPassed) {
             nextSeatNo = 0;
-//            if (currentRound >= 6) {
-            if (currentRound >= 1) {
+            if (currentRound >= 6) {
                 // 6라운드 종료 → 최종 점수 계산 → 게임 종료
                 gameEndScoringService.calculateFinalScores(gameId);
                 game.changeStatus("FINISHED");
