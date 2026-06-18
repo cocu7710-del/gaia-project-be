@@ -11,17 +11,23 @@
   5. FE 터널 실행 → 이 URL이 외부 접속 주소
 
 
-  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), 'q');
-  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), 'w');
-  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), 'e');
-  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), 'r');
-  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), '루다');
-  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), '재원');
-  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), '남현');
-  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), '흥석');
-  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), '동민');
-  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), '도희');
-  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), '지영');
-  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), '준혁');
-  INSERT INTO registered_player (id, nickname) VALUES (gen_random_uuid(), '성태');
+  -- 테스트 계정 (is_real_player = false)
+  INSERT INTO registered_player (id, nickname, is_real_player) VALUES (gen_random_uuid(), 'q', false);
+  INSERT INTO registered_player (id, nickname, is_real_player) VALUES (gen_random_uuid(), 'w', false);
+  INSERT INTO registered_player (id, nickname, is_real_player) VALUES (gen_random_uuid(), 'e', false);
+  INSERT INTO registered_player (id, nickname, is_real_player) VALUES (gen_random_uuid(), 'r', false);
+
+  -- 실제 플레이어 (is_real_player = true)
+  INSERT INTO registered_player (id, nickname, is_real_player) VALUES (gen_random_uuid(), '도희/95', true);
+  INSERT INTO registered_player (id, nickname, is_real_player) VALUES (gen_random_uuid(), '준혁/97', true);
+  INSERT INTO registered_player (id, nickname, is_real_player) VALUES (gen_random_uuid(), '윤수/92', true);
+  INSERT INTO registered_player (id, nickname, is_real_player) VALUES (gen_random_uuid(), '동민/94', true);
+  INSERT INTO registered_player (id, nickname, is_real_player) VALUES (gen_random_uuid(), '남현/93', true);
+  INSERT INTO registered_player (id, nickname, is_real_player) VALUES (gen_random_uuid(), '루다/90', true);
+  INSERT INTO registered_player (id, nickname, is_real_player) VALUES (gen_random_uuid(), '성태/98', true);
+  INSERT INTO registered_player (id, nickname, is_real_player) VALUES (gen_random_uuid(), '흥석/93', true);
+  INSERT INTO registered_player (id, nickname, is_real_player) VALUES (gen_random_uuid(), '재원/93', true);
+  INSERT INTO registered_player (id, nickname, is_real_player) VALUES (gen_random_uuid(), '지영/95', true);
+  INSERT INTO registered_player (id, nickname, is_real_player) VALUES (gen_random_uuid(), '유준/01', true);
+  INSERT INTO registered_player (id, nickname, is_real_player) VALUES (gen_random_uuid(), '유준', true);
 

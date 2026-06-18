@@ -27,4 +27,8 @@ public class RegisteredPlayer {
 
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt;
+
+    /** 실제 플레이어 여부. false면 테스트 계정으로 전적 집계에서 제외됨 */
+    @Column(name = "is_real_player", nullable = false)
+    private boolean isRealPlayer = true;
 }

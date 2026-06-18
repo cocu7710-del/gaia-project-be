@@ -54,6 +54,7 @@ public class PassService {
     private final GamePlayerStateRepository playerStateRepository;
     private final VpLogService vpLogService;
     private final GameEndScoringService gameEndScoringService;
+    private final StatsApiService statsApiService;
     private final com.gaiaproject.repository.game.GameActionRepository gameActionRepository;
     private final ActionService actionService;
     private final com.gaiaproject.repository.tech.GamePlayerTechTileRepository playerTechTileRepository;
@@ -276,12 +277,14 @@ public class PassService {
         int nextSeatNo;
         if (allPassed) {
             nextSeatNo = 0;
-            if (currentRound >= 6) {
+//            if (currentRound >= 6) {
+            if (currentRound >= 1) {
                 // 6라운드 종료 → 최종 점수 계산 → 게임 종료
                 gameEndScoringService.calculateFinalScores(gameId);
                 game.changeStatus("FINISHED");
                 game.setGamePhase("FINISHED");
                 gameRepository.save(game);
+                statsApiService.reportMatchResult(gameId);
                 webSocketService.broadcastPlayerPassed(gameId, playerId, currentSeat.getSeatNo(), true);
                 webSocketService.broadcast(com.gaiaproject.dto.websocket.GameEvent.of(gameId, "GAME_FINISHED", java.util.Map.of()));
                 log.info("게임 종료: gameId={}", gameId);

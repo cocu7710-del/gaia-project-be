@@ -34,6 +34,10 @@ spring:
     baseline-version: 0         # baseline 을 V0 으로 → V1 부터 정상 적용 (기본값 1 이면 V1 을 건너뜀)
 #    clean-disabled: false
 
+gaia-stats:
+  url: https://gaia-project-stats.vercel.app/api/record-match
+  secret: a3f8k2m9xq7b4c1d6e2f5g8h3i0j4k7l
+
 logging:
   level:
     org.hibernate.SQL: warn

@@ -20,94 +20,96 @@ public enum FactionType {
     // 기본 게임 종족
 
     /* 사막 */
-    XENOS("Xenos", "제노스", PlanetType.DESERT,
+    XENOS("Xenos", "제노스", "xenos", PlanetType.DESERT,
             new ResourcesVo(15, 4, 3, 2, 2, 4, 0, 0, 10, null),
             new TechTracksVo(0, 0, 1, 0, 0, 0)),  // AI 1
 
-    GLEENS("Gleens", "글린", PlanetType.DESERT,
+    GLEENS("Gleens", "글린", "gleens", PlanetType.DESERT,
             new ResourcesVo(15, 5, 3, 0, 2, 4, 0, 0, 10, null),
             new TechTracksVo(0, 1, 0, 0, 0, 0)),  // 항해 1
 
     /* 늪지 */
-    TAKLONS("Taklons", "타클론", PlanetType.SWAMP,
+    TAKLONS("Taklons", "타클론", "taklons", PlanetType.SWAMP,
             new ResourcesVo(15, 4, 3, 1, 2, 4, 0, 0, 10, 1),  // 브레인스톤 Bowl 1
             TechTracksVo.zero()),
-    AMBAS("Ambas", "엠바스", PlanetType.SWAMP,
+    AMBAS("Ambas", "엠바스", "ambas", PlanetType.SWAMP,
             new ResourcesVo(15, 4, 3, 2, 2, 4, 0, 0, 10, null),
             new TechTracksVo(0, 1, 0, 0, 0, 0)),  // 항해 1
 
     /* 화산 */
-    HADSCH_HALLAS("Hadsch Hallas", "하드쉬 할라", PlanetType.VOLCANIC,
+    HADSCH_HALLAS("Hadsch Hallas", "하드쉬 할라", "hadsch_hallas", PlanetType.VOLCANIC,
             new ResourcesVo(15, 4, 3, 1, 2, 4, 0, 0, 10, null),
             new TechTracksVo(0, 0, 0, 0, 1, 0)),  // 경제 1
-    IVITS("Ivits", "하이브", PlanetType.VOLCANIC,
+    IVITS("Ivits", "하이브", "ivits", PlanetType.VOLCANIC,
             new ResourcesVo(15, 4, 3, 1, 2, 2, 0, 0, 10, null),
             TechTracksVo.zero()),
 
     /* 산화물 */
-    GEODENS("Geodens", "기오덴", PlanetType.OXIDE,
+    GEODENS("Geodens", "기오덴", "geodens", PlanetType.OXIDE,
             new ResourcesVo(15, 6, 3, 1, 2, 4, 0, 0, 10, null),
             new TechTracksVo(1, 0, 0, 0, 0, 0)),  // 테라포밍 1
-    BAL_TAKS("Bal T'aks", "발타크", PlanetType.OXIDE,
+    BAL_TAKS("Bal T'aks", "발타크", "bal_taks", PlanetType.OXIDE,
             new ResourcesVo(15, 4, 3, 0, 2, 2, 0, 0, 10, null),
             new TechTracksVo(0, 0, 0, 1, 0, 0)),  // 가이아 1
 
     /* 지구 */
-    LANTIDS("Lantids", "란티다", PlanetType.TERRA,
+    LANTIDS("Lantids", "란티다", "lantids", PlanetType.TERRA,
             new ResourcesVo(13, 4, 3, 1, 4, 0, 0, 0, 10, null),
             TechTracksVo.zero()),
-    TERRANS("Terrans", "테란", PlanetType.TERRA,
+    TERRANS("Terrans", "테란", "terrans", PlanetType.TERRA,
             new ResourcesVo(15, 4, 3, 1, 4, 4, 0, 0, 10, null),
             new TechTracksVo(0, 0, 0, 1, 0, 0)),  // 가이아 1
 
     /* 티타늄 */
-    FIRAKS("Firaks", "파이락", PlanetType.TITANIUM,
+    FIRAKS("Firaks", "파이락", "firaks", PlanetType.TITANIUM,
             new ResourcesVo(15, 3, 2, 1, 2, 4, 0, 0, 10, null),
             TechTracksVo.zero()),
 
-    BESCODS("Bescods", "매드안드로이드", PlanetType.TITANIUM,
+    BESCODS("Bescods", "매드안드로이드", "bescods", PlanetType.TITANIUM,
             new ResourcesVo(15, 4, 3, 1, 2, 4, 0, 0, 10, null),
             TechTracksVo.zero()),
 
     /* 얼음 */
-    NEVLAS("Nevlas", "네블라", PlanetType.ICE,
+    NEVLAS("Nevlas", "네블라", "nevlas", PlanetType.ICE,
             new ResourcesVo(15, 4, 2, 1, 2, 4, 0, 0, 10, null),
             new TechTracksVo(0, 0, 0, 0, 0, 1)),  // 과학 1
-    ITARS("Itars", "아이타", PlanetType.ICE,
+    ITARS("Itars", "아이타", "itars", PlanetType.ICE,
             new ResourcesVo(15, 5, 3, 1, 4, 4, 0, 0, 10, null),
             TechTracksVo.zero()),
 
     // 확장 종족
 
     /* 초월차원 */
-    SPACE_GIANTS("Space Giants", "스페이스 자이언트", PlanetType.LOST_PLANET,
+    SPACE_GIANTS("Space Giants", "스페이스 자이언트", "space_giants", PlanetType.LOST_PLANET,
             new ResourcesVo(15, 6, 3, 2, 4, 4, 0, 0, 10, null),
             new TechTracksVo(0, 1, 0, 0, 0, 0)),  // 항해 1
 
-    MOWEIDS("Moweids", "모웨이드", PlanetType.LOST_PLANET,
+    MOWEIDS("Moweids", "모웨이드", "mowyed", PlanetType.LOST_PLANET,
             new ResourcesVo(15, 6, 5, 2, 4, 4, 0, 0, 10, null),
             new TechTracksVo(0, 0, 0, 1, 0, 0)),  // 가이아 1
 
     /* 소행성 */
-    TINKEROIDS("Tinkeroids", "팅커로이드", PlanetType.ASTEROIDS,
+    TINKEROIDS("Tinkeroids", "팅커로이드", "tinkeroids", PlanetType.ASTEROIDS,
             new ResourcesVo(15, 4, 2, 1, 4, 4, 0, 0, 10, null),
             new TechTracksVo(0, 0, 0, 0, 0, 1)),  // 과학 1
 
-    DAKANIANS("Dakanians", "다카니안", PlanetType.ASTEROIDS,
+    DAKANIANS("Dakanians", "다카니안", "darkanians", PlanetType.ASTEROIDS,
             new ResourcesVo(15, 7, 3, 2, 4, 2, 0, 0, 10, null),
             new TechTracksVo(0, 1, 0, 0, 1, 0));  // 항해 1, 경제 1
 
 
     private final String displayNameEn;
     private final String displayNameKo;
+    private final String statsCode;
     private final PlanetType homePlanet;
     private final ResourcesVo initialResources;
     private final TechTracksVo initialTechTracks;
 
-    FactionType(String displayNameEn, String displayNameKo, PlanetType homePlanet,
+    FactionType(String displayNameEn, String displayNameKo, String statsCode, PlanetType homePlanet,
                 ResourcesVo initialResources, TechTracksVo initialTechTracks) {
         this.displayNameEn = displayNameEn;
         this.displayNameKo = displayNameKo;
+        this.statsCode = statsCode;
         this.homePlanet = homePlanet;
         this.initialResources = initialResources;
         this.initialTechTracks = initialTechTracks;
