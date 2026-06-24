@@ -75,6 +75,9 @@ public class MapService {
         // 1. 기본 섹터 배치 (1~10번 섹터 → 위치 1~10)
         setupBasicSectors(gameId);
 
+        // 1.5. 기본 섹터 인접 행성 충돌 해소 (같은 행성 타입이 거리 1 이내에 없을 때까지 회전)
+        resolveBasicSectorConflicts(gameId);
+
         // 2. 딥 섹터 배치 (8개)
         setupDeepSectors(gameId);
 
@@ -366,6 +369,96 @@ public class MapService {
                 mapPos.getPositionNo()
         );
         gameHexRepository.save(gameHex);
+    }
+
+    /**
+     * 기본 섹터(1~10)를 순서대로 확인하며 인접 행성 충돌을 해소.
+     * 각 섹터는 최대 6번(모든 방향) 회전 시도.
+     */
+    private void resolveBasicSectorConflicts(UUID gameId) {
+        for (int positionNo = 1; positionNo <= 10; positionNo++) {
+            for (int attempt = 0; attempt < 6; attempt++) {
+                List<BasicHexCoord> allHexes = generateBasicSectorCoordsInMemory(gameId);
+                if (!hasSectorConflict(allHexes, positionNo)) break;
+
+                GameSectorPlacement placement = sectorPlacementRepository
+                        .findByGameIdAndPositionNo(gameId, positionNo)
+                        .orElseThrow();
+                placement.rotateBy60();
+                sectorPlacementRepository.save(placement);
+            }
+        }
+    }
+
+    /**
+     * 지정 섹터의 헥스 중 다른 섹터 헥스와 같은 행성 타입이 거리 1 이내에 있는지 확인.
+     */
+    private boolean hasSectorConflict(List<BasicHexCoord> allHexes, int positionNo) {
+        List<BasicHexCoord> sectorHexes = allHexes.stream()
+                .filter(h -> h.positionNo == positionNo)
+                .toList();
+        List<BasicHexCoord> otherHexes = allHexes.stream()
+                .filter(h -> h.positionNo != positionNo)
+                .toList();
+
+        for (BasicHexCoord s : sectorHexes) {
+            if (s.planetType == PlanetType.TRANSDIM) continue;
+            for (BasicHexCoord o : otherHexes) {
+                if (s.planetType == o.planetType && calcHexDistance(s.q, s.r, o.q, o.r) <= 1) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 기본 섹터(positionNo 1~10)의 헥스를 메모리에서 글로벌 좌표로 계산.
+     * EMPTY 행성은 제외.
+     */
+    private List<BasicHexCoord> generateBasicSectorCoordsInMemory(UUID gameId) {
+        List<BasicHexCoord> result = new ArrayList<>();
+
+        List<GameSectorPlacement> placements = sectorPlacementRepository
+                .findByGameIdOrderByPositionNoAsc(gameId)
+                .stream()
+                .filter(p -> p.getPositionNo() <= 10)
+                .toList();
+
+        for (GameSectorPlacement placement : placements) {
+            MapPosition mapPos = MapPosition.getSectorPosition(placement.getPositionNo());
+            List<HexData> hexDatas = parseSectorHexes(placement.getSectorType().getHexesJson());
+
+            for (HexData hex : hexDatas) {
+                PlanetType planet = PlanetType.valueOf(hex.planet);
+                if (planet == PlanetType.EMPTY) continue;
+
+                int[] global = HexUtil.toGlobal(
+                        hex.q, hex.r,
+                        mapPos.getOffsetQ(), mapPos.getOffsetR(),
+                        placement.getRotation()
+                );
+                result.add(new BasicHexCoord(global[0], global[1], planet, placement.getPositionNo()));
+            }
+        }
+        return result;
+    }
+
+    private int calcHexDistance(int q1, int r1, int q2, int r2) {
+        int dq = q2 - q1, dr = r2 - r1;
+        return (Math.abs(dq) + Math.abs(dr) + Math.abs(dq + dr)) / 2;
+    }
+
+    private static class BasicHexCoord {
+        final int q, r, positionNo;
+        final PlanetType planetType;
+
+        BasicHexCoord(int q, int r, PlanetType planetType, int positionNo) {
+            this.q = q;
+            this.r = r;
+            this.planetType = planetType;
+            this.positionNo = positionNo;
+        }
     }
 
     /**
